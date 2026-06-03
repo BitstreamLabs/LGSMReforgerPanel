@@ -296,6 +296,39 @@
   .field-group select:focus { border-color: var(--accent); }
   .field-group select option { background: var(--surface); color: var(--text); }
 
+  /* Standalone input styling — same look as .field-group inputs but
+     used outside of one (e.g. inline in flex rows). */
+  .field-input {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); font-family: 'Barlow', sans-serif;
+    font-size: 14px; padding: 10px 14px; outline: none;
+    transition: border-color 0.2s;
+  }
+  .field-input:focus { border-color: var(--accent); }
+  .field-input option { background: var(--surface); color: var(--text); }
+
+  /* Mission field: the rescan button + count badge sit absolutely in the
+     field-group's top-right corner so they don't push the grid row taller
+     than the matching label on the left. */
+  .field-group--mission { position: relative; }
+  .field-group--mission .field-aux {
+    position: absolute; top: 0; right: 0;
+    display: flex; align-items: center; gap: 12px;
+    line-height: 1;
+  }
+  .field-group--mission .field-aux #scenario-source-badge {
+    font-size: 10px; letter-spacing: 0.05em; color: var(--muted);
+    font-family: 'Barlow', sans-serif; text-transform: none;
+  }
+  .link-btn {
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    font-family: 'Barlow Condensed', sans-serif; font-weight: 700;
+    font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--muted); transition: color 0.15s;
+  }
+  .link-btn:hover     { color: var(--accent); }
+  .link-btn:disabled  { color: var(--border); cursor: not-allowed; }
+
   .btn-save {
     margin-top: 14px;
     background: var(--accent); border: none; color: #0a0c0f;
@@ -493,8 +526,12 @@
         <label for="input-name">Name serwera</label>
         <input type="text" id="input-name" placeholder="np. LEM Arma" maxlength="64" />
       </div>
-      <div class="field-group">
+      <div class="field-group field-group--mission">
         <label for="input-mission">Scenario / Mission</label>
+        <div class="field-aux">
+          <span id="scenario-source-badge"></span>
+          <button type="button" id="btn-rescan-scenarios" class="link-btn" onclick="rescanScenarios()">Rescan from mods</button>
+        </div>
         <select id="input-mission"></select>
       </div>
       <div class="field-group">
@@ -519,16 +556,39 @@
       <div style="color:var(--muted);font-size:13px">Loading mods...</div>
     </div>
 
-    <!-- Formularz dodawania -->
+    <!-- Bulk import (paste JSON or upload file) -->
     <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:4px;">
-      <div style="font-size:10px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;">Add new mod</div>
+      <div style="font-size:10px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;">Bulk import</div>
+      <textarea id="mods-import-text" rows="6" maxlength="200000" placeholder='[
+  { "modId": "595F2BF2F44836FB", "name": "RHS - Status Quo", "version": "0.14.4899" }
+]' style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11.5px;padding:10px;line-height:1.5;resize:vertical;outline:none;"></textarea>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap;">
+        <select id="mods-import-mode" class="field-input" style="min-width:180px;">
+          <option value="replace">Replace full list</option>
+          <option value="merge">Merge with existing</option>
+        </select>
+        <button class="btn-save" type="button" onclick="importModsFromTextarea()" style="margin:0;flex:0 0 auto;">Import pasted JSON</button>
+        <label class="btn-save" style="margin:0;cursor:pointer;flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text);">
+          Upload .json file
+          <input type="file" id="mods-import-file" accept="application/json,.json" onchange="importModsFromFile(this)" style="display:none;" />
+        </label>
+      </div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:8px;line-height:1.5;">
+        Format: a JSON array of <code>{ "modId": "&lt;hex&gt;", "name": "&lt;optional&gt;", "version": "&lt;optional&gt;" }</code>.
+        File limit 2 MB. Replace overwrites the whole mod list; merge adds missing entries only.
+      </div>
+    </div>
+
+    <!-- Single-add form -->
+    <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px;">
+      <div style="font-size:10px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;">Add a single mod</div>
       <div class="config-grid">
         <div class="field-group">
           <label for="mod-id">Mod ID <span style="color:var(--offline)">*</span></label>
           <input type="text" id="mod-id" placeholder="e.g. 595F2BF2F44836FB" maxlength="64" />
         </div>
         <div class="field-group">
-          <label for="mod-name">Name moda <span style="color:var(--offline)">*</span></label>
+          <label for="mod-name">Name <span style="color:var(--offline)">*</span></label>
           <input type="text" id="mod-name" placeholder="e.g. RHS - Status Quo" maxlength="128" />
         </div>
         <div class="field-group">
@@ -539,6 +599,45 @@
       <button class="btn-save" onclick="addMod()" id="btn-add-mod">Add mod</button>
       <div class="restart-notice" id="mods-restart-notice">⚠ Mod changes will be applied after server restart</div>
     </div>
+  </div>
+
+  <!-- Persistence -->
+  <div class="card" style="animation-delay:0.2s">
+    <div class="card-label">Persistence</div>
+    <div style="font-size:11.5px;color:var(--muted);line-height:1.6;margin-bottom:14px;">
+      Server launches always pass <code>-loadSessionSave</code>, so any existing save is loaded on
+      start. This toggle writes the <code>game.gameProperties.persistence</code> block in
+      <code>config.json</code> — enable to autosave every N minutes, disable to stop writing new
+      saves (existing saves still load on start; use <strong>Flush saves</strong> to start fresh).
+      Session save only works in scenarios that implement it (Conflict, Combat Ops); Game Master
+      needs manual saves from Esc.
+    </div>
+    <div class="config-grid">
+      <div class="field-group">
+        <label for="input-persist-enabled">Enabled</label>
+        <select id="input-persist-enabled">
+          <option value="false">Disabled</option>
+          <option value="true">Enabled</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label for="input-persist-interval">Auto-save interval (minutes, 0–60)</label>
+        <input type="number" id="input-persist-interval" min="0" max="60" step="1" value="10" />
+      </div>
+      <div class="field-group">
+        <label for="input-persist-hive">Hive ID (0–16383)</label>
+        <input type="number" id="input-persist-hive" min="0" max="16383" step="1" value="1" />
+      </div>
+    </div>
+    <div id="persist-stats" style="font-size:11.5px;color:var(--muted);margin-top:12px;line-height:1.6;"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
+      <button class="btn-save" id="btn-persist-save" onclick="savePersistence()">Save changes</button>
+      <button class="btn-save" id="btn-persist-flush" onclick="flushPersistence()"
+              style="background:transparent;border:1px solid var(--offline);color:var(--offline);">
+        Flush saves
+      </button>
+    </div>
+    <div class="restart-notice" id="persist-restart-notice">⚠ Restart required for persistence changes to take effect</div>
   </div>
 
   <!-- Live Logs -->
@@ -566,6 +665,42 @@
 </div>
 
 <script>
+// ─── CSRF + fetch helpers ────────────────────────────────────────────────────
+let CSRF = '';
+
+async function postJson(url, body) {
+  if (!CSRF) {
+    try { const r = await fetch('/api/csrf'); if (r.ok) CSRF = (await r.json()).csrf || ''; }
+    catch(e) {}
+  }
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+    body: JSON.stringify({ ...(body || {}), _csrf: CSRF }),
+  });
+  if (r.status === 401) { window.location.href = '/login'; throw new Error('unauthorized'); }
+  if (r.status === 403) {
+    // CSRF expired — refresh token and surface error
+    try { const cr = await fetch('/api/csrf'); if (cr.ok) CSRF = (await cr.json()).csrf || ''; } catch(e) {}
+  }
+  return r;
+}
+
+async function postForm(url, formData) {
+  if (!CSRF) {
+    try { const r = await fetch('/api/csrf'); if (r.ok) CSRF = (await r.json()).csrf || ''; }
+    catch(e) {}
+  }
+  formData.append('_csrf', CSRF);
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': CSRF },
+    body: formData,
+  });
+  if (r.status === 401) { window.location.href = '/login'; throw new Error('unauthorized'); }
+  return r;
+}
+
 // ─── Charts setup ────────────────────────────────────────────────────────────
 const MAX_POINTS = 60;
 
@@ -762,18 +897,75 @@ function updateUI(d) {
   const pwdAdminInput = document.getElementById('input-password-admin');
   if (document.activeElement !== pwdAdminInput) pwdAdminInput.value = d.password_admin || '';
 
-  const sel = document.getElementById('input-mission');
-  if (sel.options.length === 0 && d.missions) {
-    d.missions.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.id; opt.textContent = m.name;
-      sel.appendChild(opt);
-    });
-  }
-  if (d.scenario_id) sel.value = d.scenario_id;
+  if (d.csrf) CSRF = d.csrf;
+  renderMissionSelect(d.missions || [], d.missions_count, d.scenario_id);
 
   // Render listy modów
   renderMods(d.mods || []);
+}
+
+function renderMissionSelect(missions, counts, currentId) {
+  const sel = document.getElementById('input-mission');
+  // Always rebuild — discovered scenarios can change as the workshop populates.
+  const prev = sel.value || currentId || '';
+  sel.innerHTML = '';
+  // Group by source: vanilla first, then per-mod alphabetical.
+  const groups = {};
+  missions.forEach(m => {
+    const key = m.source || 'vanilla';
+    (groups[key] = groups[key] || []).push(m);
+  });
+  const sourceKeys = Object.keys(groups).sort((a, b) => {
+    if (a === 'vanilla') return -1;
+    if (b === 'vanilla') return 1;
+    return a.localeCompare(b);
+  });
+  sourceKeys.forEach(src => {
+    const og = document.createElement('optgroup');
+    og.label = src === 'vanilla' ? 'Base game' : src;
+    groups[src].forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name;
+      og.appendChild(opt);
+    });
+    sel.appendChild(og);
+  });
+  if (prev) sel.value = prev;
+
+  // Update the badge near the select if present.
+  const badge = document.getElementById('scenario-source-badge');
+  if (badge && counts) {
+    badge.textContent = `${counts.vanilla} vanilla · ${counts.from_mods} from mods`;
+  }
+}
+
+async function rescanScenarios() {
+  const btn = document.getElementById('btn-rescan-scenarios');
+  if (btn) btn.disabled = true;
+  setLog('Scanning installed mods for scenarios…', 'info');
+  try {
+    const r = await postJson('/api/scenarios/rescan', {});
+    const d = await r.json();
+    if (d.ok) {
+      renderMissionSelect(d.missions, d.missions_count);
+      const diag = d.diag || {};
+      let msg = `Vanilla: ${d.missions_count.vanilla} · From mods: ${d.missions_count.from_mods}`;
+      if (diag.workshop_dir) {
+        const n = diag.metas_found ?? diag.paks_found ?? 0;
+        msg += ` (scanned ${n} addon${n === 1 ? '' : 's'} in ${diag.workshop_dir})`;
+      } else {
+        const tried = (diag.candidates_tried || []).map(c => c.path).slice(0, 3).join(', ');
+        msg += `. No .pak files found. Tried: ${tried}${(diag.candidates_tried || []).length > 3 ? '…' : ''}. Run the server once so it downloads workshop mods, or set WORKSHOP_DIR in config.env.`;
+      }
+      setLog(msg, diag.workshop_dir ? 'ok' : 'error');
+      // Stash full diagnostics in console for deep debugging.
+      if (diag) console.log('[rescan diagnostics]', diag);
+    } else {
+      setLog('Rescan failed: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch(e) { setLog('Rescan error', 'error'); }
+  if (btn) btn.disabled = false;
 }
 
 function renderMods(mods) {
@@ -815,49 +1007,90 @@ async function addMod() {
   const modId   = document.getElementById('mod-id').value.trim();
   const modName = document.getElementById('mod-name').value.trim();
   const modVer  = document.getElementById('mod-version').value.trim();
-  if (!modId)   { setLog('Mod ID jest wymagany', 'error'); return; }
-  if (!modName) { setLog('Name moda jest wymagana', 'error'); return; }
+  if (!modId)   { setLog('Mod ID is required', 'error'); return; }
+  if (!modName) { setLog('Mod name is required', 'error'); return; }
   document.getElementById('btn-add-mod').disabled = true;
-  setLog('Dodawanie moda...', 'info');
+  setLog('Adding mod…', 'info');
   try {
-    const r = await fetch('/api/mods/add', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ modId, name: modName, version: modVer })
-    });
+    const r = await postJson('/api/mods/add', { modId, name: modName, version: modVer });
     const d = await r.json();
     if (d.ok) {
-      setLog(`Mod "${modName}" dodany`, 'ok');
+      setLog(`Mod "${modName}" added`, 'ok');
       document.getElementById('mod-id').value = '';
       document.getElementById('mod-name').value = '';
       document.getElementById('mod-version').value = '';
       document.getElementById('mods-restart-notice').classList.toggle('visible', d.restart_required);
       await fetchStatus();
     } else {
-      setLog('Błąd: ' + (d.error || 'nieznany'), 'error');
+      setLog('Error: ' + (d.error || 'unknown'), 'error');
     }
-  } catch(e) { setLog('Błąd połączenia', 'error'); }
+  } catch(e) { setLog('Connection error', 'error'); }
   document.getElementById('btn-add-mod').disabled = false;
 }
 
 async function removeMod(modId) {
-  if (!confirm('Usunąć ten mod z konfiguracji?')) return;
-  setLog('Usuwanie moda...', 'info');
+  if (!confirm('Remove this mod from the configuration?')) return;
+  setLog('Removing mod…', 'info');
   try {
-    const r = await fetch('/api/mods/remove', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ modId })
-    });
+    const r = await postJson('/api/mods/remove', { modId });
     const d = await r.json();
     if (d.ok) {
-      setLog('Mod usunięty', 'ok');
+      setLog('Mod removed', 'ok');
       document.getElementById('mods-restart-notice').classList.toggle('visible', d.restart_required);
       await fetchStatus();
     } else {
-      setLog('Błąd: ' + (d.error || 'nieznany'), 'error');
+      setLog('Error: ' + (d.error || 'unknown'), 'error');
     }
-  } catch(e) { setLog('Błąd połączenia', 'error'); }
+  } catch(e) { setLog('Connection error', 'error'); }
+}
+
+// ─── Bulk import (paste or file upload) ──────────────────────────────────────
+async function importModsFromTextarea() {
+  const txt = document.getElementById('mods-import-text').value;
+  if (!txt.trim()) { setLog('Paste a JSON array first', 'error'); return; }
+  const mode = document.getElementById('mods-import-mode').value;
+  await _importMods({ payload: txt, mode });
+}
+
+async function importModsFromFile(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  if (f.size > 2 * 1024 * 1024) { setLog('File too large (max 2 MB)', 'error'); return; }
+  const mode = document.getElementById('mods-import-mode').value;
+  setLog(`Uploading ${f.name}…`, 'info');
+  const fd = new FormData();
+  fd.append('file', f, f.name);
+  fd.append('mode', mode);
+  try {
+    const r = await postForm('/api/mods/import', fd);
+    const d = await r.json();
+    _afterImport(d);
+  } catch(e) { setLog('Upload error', 'error'); }
+  input.value = '';
+}
+
+async function _importMods(body) {
+  setLog('Importing mods…', 'info');
+  try {
+    const r = await postJson('/api/mods/import', body);
+    const d = await r.json();
+    _afterImport(d);
+  } catch(e) { setLog('Connection error', 'error'); }
+}
+
+function _afterImport(d) {
+  if (d.ok) {
+    let msg = d.message || `${d.imported} mods imported`;
+    if (d.skipped && d.skipped.length) {
+      msg += ` (${d.skipped.length} skipped: ${d.skipped.slice(0, 3).join('; ')}${d.skipped.length > 3 ? '…' : ''})`;
+    }
+    setLog(msg, 'ok');
+    document.getElementById('mods-import-text').value = '';
+    document.getElementById('mods-restart-notice').classList.toggle('visible', d.restart_required);
+    fetchStatus();
+  } else {
+    setLog('Import failed: ' + (d.error || 'unknown'), 'error');
+  }
 }
 
 function setLog(msg, type = 'info') {
@@ -869,8 +1102,9 @@ function setLog(msg, type = 'info') {
 
 function setBusy(state) {
   busy = state;
-  ['btn-start','btn-stop','btn-reset','btn-save'].forEach(id => {
-    document.getElementById(id).disabled = state;
+  ['btn-start','btn-stop','btn-reset','btn-save','btn-persist-save','btn-persist-flush'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = state;
   });
 }
 
@@ -879,7 +1113,7 @@ async function serverAction(action) {
   setBusy(true);
   setLog(labels[action], 'info');
   try {
-    const r = await fetch('/api/' + action, { method: 'POST' });
+    const r = await postJson('/api/' + action, {});
     if (r.status === 401) { window.location.href = '/login'; return; }
     const d = await r.json();
     if (d.ok) {
@@ -906,12 +1140,7 @@ async function saveConfig() {
   setBusy(true);
   setLog('Zapisywanie konfiguracji...', 'info');
   try {
-    const r = await fetch('/api/config', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ server_name: name, scenario_id: scenario, password, password_admin: pwdAdmin })
-    });
-    if (r.status === 401) { window.location.href = '/login'; return; }
+    const r = await postJson('/api/config', { server_name: name, scenario_id: scenario, password, password_admin: pwdAdmin });
     const d = await r.json();
     if (d.ok) {
       setLog('Konfiguracja zapisana', 'ok');
@@ -921,6 +1150,87 @@ async function saveConfig() {
       setLog('Błąd zapisu: ' + (d.error || 'nieznany'), 'error');
     }
   } catch(e) { setLog('Błąd połączenia', 'error'); }
+  setBusy(false);
+}
+
+function _fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B','KB','MB','GB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+function _fmtAge(ts) {
+  if (!ts) return 'never';
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (s < 60)   return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+function _renderPersistStats(s) {
+  const el = document.getElementById('persist-stats');
+  if (!s.saves) { el.textContent = ''; return; }
+  const { path, exists, total, buckets } = s.saves;
+  if (!exists || !total || total.count === 0) {
+    el.innerHTML = `No saves yet under <code>${escHtml(path || '')}</code>.`;
+    return;
+  }
+  const bucketLabel = { game: 'World session', playersave: 'Player saves', settings: 'Settings' };
+  const rows = ['game', 'playersave', 'settings']
+    .filter(k => buckets && buckets[k] && buckets[k].count > 0)
+    .map(k => `${bucketLabel[k]}: ${buckets[k].count} file${buckets[k].count === 1 ? '' : 's'}, ${_fmtBytes(buckets[k].bytes)} (newest ${_fmtAge(buckets[k].newest)})`)
+    .join(' · ');
+  el.innerHTML = `<code>${escHtml(path)}</code><br>${rows || 'empty'}`;
+}
+
+async function fetchPersistence() {
+  try {
+    const r = await fetch('/api/persistence');
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('input-persist-enabled').value  = d.enabled ? 'true' : 'false';
+    document.getElementById('input-persist-interval').value = d.autoSaveInterval;
+    document.getElementById('input-persist-hive').value     = d.hiveId;
+    _renderPersistStats(d);
+  } catch (e) { /* panel is the source of truth; silent on transient errors */ }
+}
+
+async function savePersistence() {
+  const enabled  = document.getElementById('input-persist-enabled').value === 'true';
+  const interval = parseInt(document.getElementById('input-persist-interval').value, 10);
+  const hive     = parseInt(document.getElementById('input-persist-hive').value, 10);
+  setBusy(true);
+  setLog('Saving persistence settings...', 'info');
+  try {
+    const r = await postJson('/api/persistence', { enabled, autoSaveInterval: interval, hiveId: hive });
+    const d = await r.json();
+    if (d.ok) {
+      setLog(enabled ? 'Persistence enabled' : 'Persistence disabled', 'ok');
+      document.getElementById('persist-restart-notice').classList.toggle('visible', !!d.restart_required);
+      await fetchPersistence();
+    } else {
+      setLog('Save failed: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch (e) { setLog('Connection error', 'error'); }
+  setBusy(false);
+}
+
+async function flushPersistence() {
+  if (!confirm('Delete the world-session save (.save/game) and per-player saves (.save/playersave)? Server settings are kept. The next launch starts a fresh world. This cannot be undone.')) return;
+  setBusy(true);
+  setLog('Flushing saves...', 'info');
+  try {
+    const r = await postJson('/api/persistence/flush', {});
+    const d = await r.json();
+    if (d.ok) {
+      setLog(`Removed ${d.removed} save file${d.removed === 1 ? '' : 's'}`, 'ok');
+      _renderPersistStats(d);
+    } else {
+      setLog('Flush failed: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch (e) { setLog('Connection error', 'error'); }
   setBusy(false);
 }
 
@@ -940,7 +1250,7 @@ function startCountdown() {
   }, 1000);
 }
 
-fetchStatus().then(startCountdown);
+fetchStatus().then(() => { fetchPersistence(); startCountdown(); });
 
 // PWA — rejestracja service workera
 if ('serviceWorker' in navigator) {

@@ -184,8 +184,10 @@ if [[ "$MODE" == "full" ]]; then
     echo -e "${YELLOW}[2/6] Installing system dependencies...${NC}"
     dpkg --add-architecture i386
     apt-get update -qq
-    apt-get install -y -qq python3 python3-pip curl lib32gcc-s1 iptables-persistent
-    pip3 install flask --break-system-packages -q
+    # Install Flask and bcrypt via apt rather than pip — avoids the "Cannot
+    # uninstall blinker, RECORD file not found" error caused by pip trying
+    # to replace apt-managed dependencies on Ubuntu 24.04.
+    apt-get install -y -qq python3 curl lib32gcc-s1 binutils python3-flask python3-bcrypt
     echo -e "      ${GREEN}✓ Done.${NC}"
 
     # Step 3: SteamCMD
@@ -203,9 +205,11 @@ if [[ "$MODE" == "full" ]]; then
     echo -e "      ${DIM}This may take 10–30 minutes depending on your connection.${NC}"
     mkdir -p "$SERVER_DIR"
     chown -R "$ARMA_USER:$ARMA_USER" "$SERVER_DIR"
+    # NOTE: +force_install_dir MUST come before +login, otherwise SteamCMD
+    # fails with "Please use force_install_dir before logon!"
     sudo -u "$ARMA_USER" "$STEAM_DIR/steamcmd.sh" \
-        +login anonymous \
         +force_install_dir "$SERVER_DIR" \
+        +login anonymous \
         +app_update "$ARMA_APP_ID" validate \
         +quit
     echo -e "      ${GREEN}✓ Arma Reforger Server downloaded.${NC}"
@@ -247,12 +251,8 @@ EOF
     chown "$ARMA_USER:$ARMA_USER" "$SERVER_CONFIG"
     echo -e "      ${GREEN}✓ config.json generated.${NC}"
 
-    # Firewall
-    echo -e "      Opening game ports (UDP ${GAME_PORT}, 17777, 27016)..."
-    iptables -I INPUT -p udp --dport "$GAME_PORT" -j ACCEPT 2>/dev/null || true
-    iptables -I INPUT -p udp --dport 17777        -j ACCEPT 2>/dev/null || true
-    iptables -I INPUT -p udp --dport 27016        -j ACCEPT 2>/dev/null || true
-    netfilter-persistent save 2>/dev/null || true
+    # Firewall is intentionally NOT touched — see post-install summary.
+    # The user is expected to manage their own firewall (UFW recommended).
 
     # Arma server systemd service
     cat > /etc/systemd/system/arma-server.service << EOF
@@ -264,7 +264,7 @@ After=network.target
 Type=simple
 User=${ARMA_USER}
 WorkingDirectory=${SERVER_DIR}
-ExecStart=${SERVER_DIR}/${ARMA_BINARY} -config ${SERVER_CONFIG} -maxFPS=${MAX_FPS}
+ExecStart=${SERVER_DIR}/${ARMA_BINARY} -config ${SERVER_CONFIG} -loadSessionSave -maxFPS=${MAX_FPS}
 Restart=on-failure
 RestartSec=10
 
@@ -288,8 +288,7 @@ echo -e "${YELLOW}[${PANEL_STEP}/${TOTAL_STEPS}] Installing management panel...$
 # Dependencies (panel-only mode)
 if [[ "$MODE" == "panel" ]]; then
     apt-get update -qq
-    apt-get install -y -qq python3 python3-pip iptables-persistent
-    pip3 install flask --break-system-packages -q
+    apt-get install -y -qq python3 binutils python3-flask python3-bcrypt
 fi
 
 mkdir -p "$PANEL_DIR/static"
@@ -308,12 +307,28 @@ for f in manifest.json service-worker.js icon-192.png icon-512.png; do
     fi
 done
 
+# Hash the panel password with bcrypt so it isn't stored in plaintext.
+# Falls back to plaintext only if bcrypt isn't available (shouldn't happen).
+PANEL_PASSWORD_HASH=$(python3 -c "
+import bcrypt, sys
+print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt()).decode())
+" "$PANEL_PASSWORD" 2>/dev/null || true)
+
+# Default workshop dir for the addons that the Reforger server downloads.
+WORKSHOP_DIR="${ARMA_HOME}/.local/share/Arma Reforger/addons"
+# Default profile dir: where Reforger writes session saves. Linux dedicated
+# layout puts them under `{ARMA_HOME}/.config/ArmaReforger/profile/.save/`.
+PROFILE_DIR="${ARMA_HOME}/.config/ArmaReforger/profile"
+
 cat > "$PANEL_DIR/config.env" << EOF
-PANEL_PASSWORD=${PANEL_PASSWORD}
+# bcrypt-hashed admin password. Generated at install time.
+PANEL_PASSWORD_HASH=${PANEL_PASSWORD_HASH}
 PANEL_PORT=${PANEL_PORT}
 SERVER_DIR=${SERVER_DIR}
 SERVER_CONFIG=${SERVER_CONFIG}
 LOG_DIR=${LOG_DIR}
+WORKSHOP_DIR=${WORKSHOP_DIR}
+PROFILE_DIR=${PROFILE_DIR}
 MAX_FPS=${MAX_FPS}
 EOF
 chmod 600 "$PANEL_DIR/config.env"
@@ -340,8 +355,7 @@ systemctl daemon-reload
 systemctl enable arma-panel
 systemctl restart arma-panel
 
-iptables -I INPUT -p tcp --dport "$PANEL_PORT" -j ACCEPT 2>/dev/null || true
-netfilter-persistent save 2>/dev/null || true
+# Firewall is intentionally NOT touched — see post-install summary.
 
 echo -e "      ${GREEN}✓ Panel installed and started.${NC}"
 
@@ -364,12 +378,26 @@ echo ""
 fi
 echo -e "  ${BOLD}Management Panel:${NC}"
 echo -e "    URL      : ${CYAN}http://${PUBLIC_IP}:${PANEL_PORT}${NC}"
-echo -e "    Password : ${CYAN}${PANEL_PASSWORD}${NC}"
+echo -e "    Password : ${DIM}(the one you entered — it has been bcrypt-hashed in config.env)${NC}"
 echo -e "    Restart  : ${YELLOW}sudo systemctl restart arma-panel${NC}"
 echo -e "    Logs     : ${YELLOW}sudo journalctl -u arma-panel -f${NC}"
 echo ""
 echo -e "  ${BOLD}Update panel in the future:${NC}"
 echo -e "    ${YELLOW}git pull && sudo bash install.sh --update${NC}"
+echo ""
+echo -e "${BOLD}${YELLOW}⚠  Firewall — action required${NC}"
+echo -e "  This installer does ${BOLD}not${NC} touch your firewall. Open the following ports"
+echo -e "  yourself so players (and you) can reach the server and panel:"
+echo ""
+if [[ "$MODE" == "full" ]]; then
+echo -e "    ${CYAN}sudo ufw allow ${GAME_PORT}/udp${NC}      ${DIM}# Reforger game port${NC}"
+echo -e "    ${CYAN}sudo ufw allow 17777/udp${NC}              ${DIM}# A2S server-browser query${NC}"
+fi
+echo -e "    ${CYAN}sudo ufw allow ${PANEL_PORT}/tcp${NC}        ${DIM}# Panel web UI${NC}"
+echo -e "    ${CYAN}sudo ufw reload${NC}"
+echo ""
+echo -e "  ${DIM}Tip: bind the panel to 127.0.0.1 and SSH-tunnel instead of opening${NC}"
+echo -e "  ${DIM}${PANEL_PORT}/tcp publicly — even with the hashed password, HTTP is sniffable.${NC}"
 echo ""
 if [[ "$MODE" == "full" ]]; then
 echo -e "  ${DIM}Tip: Connect in-game via Multiplayer → Direct Connect → ${PUBLIC_IP}:${GAME_PORT}${NC}"
