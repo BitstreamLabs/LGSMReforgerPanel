@@ -442,8 +442,53 @@
       <div class="tag">&#9632; Server Management Panel</div>
       <h1>ARMA <span>REFORGER</span></h1>
     </div>
-    <button class="btn-logout" onclick="doLogout()">Logout ↗</button>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <select id="server-select" class="field-input" style="min-width:180px;display:none;" onchange="switchServer(this.value)"></select>
+      <button class="btn-logout" onclick="toggleManageServers()">Manage servers</button>
+      <button class="btn-logout" onclick="doLogout()">Logout ↗</button>
+    </div>
   </header>
+
+  <!-- Manage Servers -->
+  <div class="card" id="manage-servers-card" style="display:none;animation-delay:0.02s">
+    <div class="card-label">Manage Servers</div>
+    <div style="font-size:11.5px;color:var(--muted);line-height:1.6;margin-bottom:14px;">
+      Each entry is a local LinuxGSM instance. The <code>id</code> must match the instance
+      script name exactly (e.g. <code>armarserver1</code>), and <code>lgsm_dir</code> is the
+      directory that script lives in.
+    </div>
+    <div id="servers-list" style="margin-bottom:16px;display:flex;flex-direction:column;gap:8px;"></div>
+    <div style="border-top:1px solid var(--border);padding-top:16px;">
+      <div style="font-size:10px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;">Add a server</div>
+      <div class="config-grid">
+        <div class="field-group">
+          <label for="srv-id">Instance id <span style="color:var(--offline)">*</span></label>
+          <input type="text" id="srv-id" placeholder="e.g. armarserver1" maxlength="32" />
+        </div>
+        <div class="field-group">
+          <label for="srv-name">Display name <span style="color:var(--offline)">*</span></label>
+          <input type="text" id="srv-name" placeholder="e.g. Main Conflict Server" maxlength="64" />
+        </div>
+        <div class="field-group" style="grid-column:1 / -1;">
+          <label for="srv-lgsm-dir">LGSM directory <span style="color:var(--offline)">*</span></label>
+          <input type="text" id="srv-lgsm-dir" placeholder="e.g. /home/arma/servers/armarserver1" />
+        </div>
+      </div>
+      <button class="btn-save" id="btn-add-server" onclick="addServer()">Add server</button>
+    </div>
+  </div>
+
+  <!-- No servers prompt -->
+  <div class="card" id="no-servers-card" style="display:none;">
+    <div class="card-label">Get Started</div>
+    <div style="font-size:13px;color:var(--text);line-height:1.6;">
+      No servers registered yet. Click <strong>Manage servers</strong> above and add your first
+      LinuxGSM instance.
+    </div>
+  </div>
+
+  <!-- Dashboard (hidden until a server is registered) -->
+  <div id="dashboard" style="display:none;">
 
   <!-- Status -->
   <div class="card clip">
@@ -658,6 +703,8 @@
     <div class="log-entry info" id="log-msg">Oczekiwanie na dane serwera...</div>
   </div>
 
+  </div> <!-- /#dashboard -->
+
   <footer>
     Refresh in <span id="refresh-timer">10</span>s &nbsp;|&nbsp; Panel v3.0
   </footer>
@@ -665,8 +712,31 @@
 </div>
 
 <script>
+// ─── Server selection ─────────────────────────────────────────────────────────
+// currentServerId is injected into every API call below: as `server_id` in
+// POST bodies/forms, and as a `?server=` query param for GETs.
+let currentServerId = localStorage.getItem('armaPanelServerId') || '';
+
+function setCurrentServer(id) {
+  currentServerId = id || '';
+  if (currentServerId) localStorage.setItem('armaPanelServerId', currentServerId);
+  else localStorage.removeItem('armaPanelServerId');
+}
+
+function withServerParam(url) {
+  if (!currentServerId) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}server=${encodeURIComponent(currentServerId)}`;
+}
+
 // ─── CSRF + fetch helpers ────────────────────────────────────────────────────
 let CSRF = '';
+
+async function apiGet(url) {
+  const r = await fetch(withServerParam(url));
+  if (r.status === 401) { window.location.href = '/login'; throw new Error('unauthorized'); }
+  return r;
+}
 
 async function postJson(url, body) {
   if (!CSRF) {
@@ -676,7 +746,7 @@ async function postJson(url, body) {
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
-    body: JSON.stringify({ ...(body || {}), _csrf: CSRF }),
+    body: JSON.stringify({ server_id: currentServerId, ...(body || {}), _csrf: CSRF }),
   });
   if (r.status === 401) { window.location.href = '/login'; throw new Error('unauthorized'); }
   if (r.status === 403) {
@@ -692,6 +762,7 @@ async function postForm(url, formData) {
     catch(e) {}
   }
   formData.append('_csrf', CSRF);
+  formData.append('server_id', currentServerId);
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'X-CSRF-Token': CSRF },
@@ -759,8 +830,9 @@ function pushChart(chart, value) {
 
 // ─── Metrics polling ─────────────────────────────────────────────────────────
 async function fetchMetrics() {
+  if (!currentServerId) return;
   try {
-    const r = await fetch('/api/metrics');
+    const r = await apiGet('/api/metrics');
     if (r.status === 401) { window.location.href = '/login'; return; }
     const d = await r.json();
 
@@ -777,7 +849,6 @@ async function fetchMetrics() {
 }
 
 setInterval(fetchMetrics, 3000);
-fetchMetrics();
 
 // ─── SSE Log stream ───────────────────────────────────────────────────────────
 let evtSource = null;
@@ -813,6 +884,10 @@ function clearLog() {
 
 function startLogStream() {
   if (evtSource) evtSource.close();
+  if (!currentServerId) {
+    document.getElementById('log-live-dot').classList.add('off');
+    return;
+  }
 
   // Pobierz ostatnie 80 linii od razu
   fetchLogs(80);
@@ -825,8 +900,9 @@ function startLogStream() {
 let lastLogLine = '';
 
 async function fetchLogs(count) {
+  if (!currentServerId) return;
   try {
-    const r = await fetch(`/api/logs?lines=${count}`);
+    const r = await apiGet(`/api/logs?lines=${count}`);
     if (!r.ok) return;
     const d = await r.json();
     if (!d.lines || d.lines.length === 0) return;
@@ -852,16 +928,15 @@ async function fetchLogs(count) {
   } catch(e) {}
 }
 
-startLogStream();
-
 // ─── Status polling ───────────────────────────────────────────────────────────
 let refreshInterval = null;
 let countdown = 10;
 let busy = false;
 
 async function fetchStatus() {
+  if (!currentServerId) return;
   try {
-    const r = await fetch('/api/status');
+    const r = await apiGet('/api/status');
     if (r.status === 401) { window.location.href = '/login'; return; }
     const d = await r.json();
     updateUI(d);
@@ -1186,8 +1261,9 @@ function _renderPersistStats(s) {
 }
 
 async function fetchPersistence() {
+  if (!currentServerId) return;
   try {
-    const r = await fetch('/api/persistence');
+    const r = await apiGet('/api/persistence');
     if (!r.ok) return;
     const d = await r.json();
     document.getElementById('input-persist-enabled').value  = d.enabled ? 'true' : 'false';
@@ -1250,7 +1326,147 @@ function startCountdown() {
   }, 1000);
 }
 
-fetchStatus().then(() => { fetchPersistence(); startCountdown(); });
+// ─── Server management ───────────────────────────────────────────────────────
+let knownServers = [];
+
+function toggleManageServers() {
+  const card = document.getElementById('manage-servers-card');
+  card.style.display = card.style.display === 'none' ? '' : 'none';
+}
+
+function renderServerSelect(servers) {
+  const sel = document.getElementById('server-select');
+  sel.style.display = servers.length ? '' : 'none';
+  sel.innerHTML = '';
+  servers.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = (s.running ? '● ' : '○ ') + s.name;
+    sel.appendChild(opt);
+  });
+  if (currentServerId) sel.value = currentServerId;
+}
+
+function renderServersList(servers) {
+  const el = document.getElementById('servers-list');
+  if (!servers.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:13px;font-style:italic">No servers registered yet</div>';
+    return;
+  }
+  el.innerHTML = '';
+  servers.forEach(s => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:var(--bg);border:1px solid var(--border)';
+    row.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+        <div style="font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:15px;color:#fff;letter-spacing:0.04em">
+          ${s.running ? '<span style="color:var(--online)">●</span>' : '<span style="color:var(--muted)">○</span>'} ${escHtml(s.name)}
+        </div>
+        <span style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace">${escHtml(s.id)}</span>
+      </div>
+      <button onclick="removeServer('${escHtml(s.id)}')" style="
+        background:transparent;border:1px solid var(--border);color:var(--muted);
+        font-family:'Barlow Condensed',sans-serif;font-size:11px;letter-spacing:0.15em;
+        text-transform:uppercase;padding:5px 12px;cursor:pointer;flex-shrink:0;
+        transition:all 0.2s;white-space:nowrap
+      " onmouseover="this.style.borderColor='var(--offline)';this.style.color='var(--offline)'"
+         onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+        Remove ✕
+      </button>`;
+    el.appendChild(row);
+  });
+}
+
+function applyServersState(servers) {
+  knownServers = servers;
+  const hasServers = servers.length > 0;
+  document.getElementById('dashboard').style.display = hasServers ? '' : 'none';
+  document.getElementById('no-servers-card').style.display = hasServers ? 'none' : '';
+  if (!hasServers) document.getElementById('manage-servers-card').style.display = '';
+  renderServerSelect(servers);
+  renderServersList(servers);
+  if (hasServers && !servers.some(s => s.id === currentServerId)) {
+    setCurrentServer(servers[0].id);
+    renderServerSelect(servers);
+  }
+}
+
+async function loadServers() {
+  try {
+    const r = await fetch('/api/servers');
+    if (r.status === 401) { window.location.href = '/login'; return; }
+    const d = await r.json();
+    if (d.csrf) CSRF = d.csrf;
+    applyServersState(d.servers || []);
+  } catch (e) { setLog('Could not load server list', 'error'); }
+}
+
+async function switchServer(id) {
+  setCurrentServer(id);
+  cpuChart.data.datasets[0].data = Array(MAX_POINTS).fill(null);
+  ramChart.data.datasets[0].data = Array(MAX_POINTS).fill(null);
+  cpuChart.update('none');
+  ramChart.update('none');
+  lastLogLine = '';
+  document.getElementById('log-output').innerHTML = '';
+  startLogStream();
+  await Promise.all([fetchStatus(), fetchPersistence()]);
+  fetchMetrics();
+}
+
+async function addServer() {
+  const id = document.getElementById('srv-id').value.trim();
+  const name = document.getElementById('srv-name').value.trim();
+  const lgsmDir = document.getElementById('srv-lgsm-dir').value.trim();
+  if (!id || !name || !lgsmDir) { setLog('Instance id, name and LGSM directory are all required', 'error'); return; }
+  document.getElementById('btn-add-server').disabled = true;
+  setLog('Adding server…', 'info');
+  try {
+    const r = await postJson('/api/servers/add', { id, name, lgsm_dir: lgsmDir });
+    const d = await r.json();
+    if (d.ok) {
+      setLog(`Server "${name}" added`, 'ok');
+      document.getElementById('srv-id').value = '';
+      document.getElementById('srv-name').value = '';
+      document.getElementById('srv-lgsm-dir').value = '';
+      const wasEmpty = knownServers.length === 0;
+      await loadServers();
+      if (wasEmpty) await switchServer(d.server.id);
+    } else {
+      setLog('Error: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch (e) { setLog('Connection error', 'error'); }
+  document.getElementById('btn-add-server').disabled = false;
+}
+
+async function removeServer(id) {
+  if (!confirm('Remove this server from the panel? This does not touch its files or the LGSM instance itself.')) return;
+  setLog('Removing server…', 'info');
+  try {
+    const r = await postJson('/api/servers/remove', { id });
+    const d = await r.json();
+    if (d.ok) {
+      setLog('Server removed', 'ok');
+      if (currentServerId === id) setCurrentServer('');
+      await loadServers();
+      if (currentServerId) await switchServer(currentServerId);
+    } else {
+      setLog('Error: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch (e) { setLog('Connection error', 'error'); }
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+(async function init() {
+  await loadServers();
+  if (currentServerId) {
+    startLogStream();
+    await fetchStatus();
+    await fetchPersistence();
+    fetchMetrics();
+  }
+  startCountdown();
+})();
 
 // PWA — rejestracja service workera
 if ('serviceWorker' in navigator) {

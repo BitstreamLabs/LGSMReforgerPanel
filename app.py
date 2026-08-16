@@ -1,6 +1,12 @@
 """
-Arma Reforger Server Management Panel
-https://github.com/mateuszgolebiewski-code/arma-reforger-panel
+Arma Reforger Server Management Panel — LGSM multi-server edition
+https://github.com/BitstreamLabs/arma-reforger-panel
+
+Manages one or more local LinuxGSM (https://linuxgsm.com) Arma Reforger
+("armarserver") instances from a single panel. Each instance is described by
+a record in servers.json; the panel drives it entirely through its LGSM
+instance script (`./<id> start|stop|restart`) rather than spawning or
+killing the game binary itself.
 
 Local fork — modifications:
   - Bcrypt-hashed admin password + constant-time verification + rate limiting
@@ -8,6 +14,7 @@ Local fork — modifications:
   - Persistent SECRET_KEY (sessions survive panel restart)
   - Bulk mod import via pasted JSON array or uploaded JSON file
   - Auto-discovery of scenarios from installed mods (`.pak` strings scan, mtime-cached)
+  - Multi-server support driven by LGSM instance scripts (servers.json)
 """
 
 from flask import Flask, request, jsonify, session, redirect, Response, send_from_directory
@@ -53,31 +60,7 @@ if not PANEL_PASSWORD_HASH:
     PANEL_PASSWORD_HASH = bcrypt.hashpw(b"changeme", bcrypt.gensalt()).decode()
     print("[panel] WARNING: no panel password set. Defaulting to 'changeme'.", flush=True)
 
-PANEL_PORT     = int(_cfg.get("PANEL_PORT", 8888))
-SERVER_DIR     = _cfg.get("SERVER_DIR",    "/home/arma/server")
-SERVER_CONFIG  = _cfg.get("SERVER_CONFIG", "/home/arma/server/config.json")
-LOG_DIR        = _cfg.get("LOG_DIR",       "/home/arma/.config/ArmaReforger/logs")
-WORKSHOP_DIR   = _cfg.get("WORKSHOP_DIR",  os.path.expanduser("~/.local/share/Arma Reforger/addons"))
-# Where Reforger writes session saves. The real layout produced by the server
-# under install.sh defaults is `{LOG_DIR_parent}/profile/.save/`, e.g.
-# `/home/arma/.config/ArmaReforger/profile/.save/{game,playersave,settings}/`.
-# Override with PROFILE_DIR in config.env if your install differs.
-PROFILE_DIR    = _cfg.get(
-    "PROFILE_DIR",
-    os.path.join(os.path.dirname(LOG_DIR.rstrip("/")) or "/home/arma/.config/ArmaReforger", "profile"),
-)
-SERVER_BINARY  = "./ArmaReforgerServer"
-MAX_FPS        = _cfg.get("MAX_FPS", "").strip()
-
-def build_server_args():
-    """Build the launch arguments. `-loadSessionSave` is always passed: with no
-    save files it's a no-op, and including it keeps panel-launched and
-    systemd-launched starts behaving the same way. The 'enabled' toggle in the
-    UI controls only the `persistence` block in config.json (autosave)."""
-    args = ["-config", SERVER_CONFIG, "-loadSessionSave"]
-    if MAX_FPS:
-        args.append(f"-maxFPS={MAX_FPS}")
-    return args
+PANEL_PORT = int(_cfg.get("PANEL_PORT", 8888))
 
 # Persistent secret key so sessions survive panel restarts.
 _SECRET_FILE = os.path.join(_BASE_DIR, ".panel-secret")
@@ -108,6 +91,67 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=60 * 60 * 12,
     MAX_CONTENT_LENGTH=2 * 1024 * 1024,  # 2 MB cap on uploads
 )
+
+
+# ─── SERVERS (servers.json) ───────────────────────────────────────────────────
+#
+# Each server is an independent LinuxGSM instance living in its own root
+# directory (`lgsm_dir`), with an instance script named after its `id`
+# (`<lgsm_dir>/<id>`). Under LGSM's default Arma Reforger template:
+#   config json   : <lgsm_dir>/serverfiles/<id>_config.json
+#   profile dir   : <lgsm_dir>/serverfiles/profiles/server
+#   session logs  : <profile_dir>/logs/logs_<ts>/console.log
+#   workshop dir  : <profile_dir>/addons
+# These are used as defaults when a server is registered, but every path is
+# stored explicitly (not re-derived at runtime) so a non-standard layout can
+# be edited in servers.json / the Manage Servers UI.
+
+_SERVERS_FILE = os.path.join(_BASE_DIR, "servers.json")
+_SERVERS_LOCK = threading.Lock()
+
+_SERVER_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
+
+
+def load_servers():
+    try:
+        with open(_SERVERS_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_servers(servers):
+    with _SERVERS_LOCK:
+        tmp = _SERVERS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(servers, f, indent=2)
+        os.replace(tmp, _SERVERS_FILE)
+
+
+def get_server(server_id):
+    if not server_id:
+        return None
+    for s in load_servers():
+        if s.get("id") == server_id:
+            return s
+    return None
+
+
+def derive_server_paths(lgsm_dir, server_id):
+    """LGSM's default Arma Reforger layout for a fresh instance."""
+    serverfiles = os.path.join(lgsm_dir, "serverfiles")
+    profile_dir = os.path.join(serverfiles, "profiles", "server")
+    return {
+        "server_config": os.path.join(serverfiles, f"{server_id}_config.json"),
+        "profile_dir":   profile_dir,
+        "log_dir":       os.path.join(profile_dir, "logs"),
+        "workshop_dir":  os.path.join(profile_dir, "addons"),
+    }
+
+
+def _instance_script(server):
+    return os.path.join(server["lgsm_dir"], server["id"])
 
 
 # ─── SECURITY HELPERS ─────────────────────────────────────────────────────────
@@ -162,6 +206,19 @@ def _csrf_required() -> Response | None:
     return None
 
 
+def _require_server():
+    """Resolve the server referenced by the request (query string for GET,
+    JSON body / form for POST). Returns (server, error_response)."""
+    sid = request.args.get("server") or ""
+    if not sid:
+        body = request.get_json(silent=True) or {}
+        sid = body.get("server_id") or request.form.get("server_id") or ""
+    server = get_server(sid)
+    if not server:
+        return None, (jsonify({"ok": False, "error": "Unknown or missing server id"}), 400)
+    return server, None
+
+
 @app.after_request
 def _security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -171,10 +228,9 @@ def _security_headers(resp):
 
 # ─── MISSIONS ─────────────────────────────────────────────────────────────────
 #
-# Hardcoded Bohemia/vanilla scenarios used as a fallback when the dedicated
-# server install can't be scanned (e.g. SERVER_DIR misconfigured). When the
-# server install IS scannable, dynamic discovery from its addons folder
-# supersedes this list.
+# Hardcoded Bohemia/vanilla scenarios used as a fallback when a server's
+# install can't be scanned (e.g. misconfigured paths). When the server install
+# IS scannable, dynamic discovery from its addons folder supersedes this list.
 
 AVAILABLE_MISSIONS = [
     # Everon
@@ -241,65 +297,71 @@ _SCENARIO_NAME_OVERRIDES = {
 
 # ─── SCENARIO AUTO-DISCOVERY (workshop meta) ─────────────────────────────────
 #
-# Reforger workshop mods unpack to <WORKSHOP_DIR>/<Name>_<HEXID>/. Each addon
+# Reforger workshop mods unpack to <workshop_dir>/<Name>_<HEXID>/. Each addon
 # ships a `meta` file (UTF-8-with-BOM JSON) that contains the workshop
 # metadata, including a `versions[].scenarios[]` array. Each scenario entry
 # is a dict with at least `name` and `gameId` (the full {HEX16}Missions/...
 # .conf identifier we need). This is far more reliable than scanning the
 # binary .pak file — and the `meta` file is tiny, so the scan is instant.
 #
-# We cache results per addon dir by `meta` mtime to avoid re-reading the same
-# file if nothing changed.
+# Results are cached per-server (different instances can have different mods
+# installed) by addon dir mtime to avoid re-reading unchanged files.
 
 _SCENARIO_GAME_ID_RE = re.compile(r'^\{[0-9A-Fa-f]{16}\}.+\.conf$')
-_SCAN_CACHE_FILE = os.path.join(_BASE_DIR, ".scenario-cache.json")
 
 
-def _scan_cache_load():
+def _scan_cache_file(server):
+    return os.path.join(_BASE_DIR, f".scenario-cache-{server['id']}.json")
+
+
+def _scan_cache_load(server):
     try:
-        with open(_SCAN_CACHE_FILE) as f:
+        with open(_scan_cache_file(server)) as f:
             data = json.load(f)
         return data.get("mods", {}), data.get("mtimes", {})
     except (OSError, json.JSONDecodeError):
         return {}, {}
 
 
-def _scan_cache_save(mods, mtimes):
+def _scan_cache_save(server, mods, mtimes):
     try:
-        with open(_SCAN_CACHE_FILE, "w") as f:
+        with open(_scan_cache_file(server), "w") as f:
             json.dump({"mods": mods, "mtimes": mtimes, "saved_at": time.time()}, f)
     except OSError as e:
         print(f"[panel] WARNING: could not write scenario cache: {e}", flush=True)
 
 
-_SCAN_LOCK = threading.Lock()
-_LAST_SCAN_RESULT: dict = {"scenarios": [], "diag": None, "ts": 0.0}
+_SCAN_LOCKS: dict[str, threading.Lock] = {}
+_SCAN_LOCKS_GUARD = threading.Lock()
+_LAST_SCAN_RESULTS: dict[str, dict] = {}
 
 
-def _candidate_addon_roots():
+def _scan_lock(server_id):
+    with _SCAN_LOCKS_GUARD:
+        lock = _SCAN_LOCKS.setdefault(server_id, threading.Lock())
+    return lock
+
+
+def _candidate_addon_roots(server):
     """Locations to scan for addons. Each entry is (path, is_vanilla).
     `is_vanilla=True` means anything found there is Bohemia-shipped game
-    content (the dedicated server's bundled addons), not a workshop mod."""
-    home = os.path.dirname(SERVER_DIR.rstrip("/")) if SERVER_DIR else os.path.expanduser("~")
-    if not home or home == "/":
-        home = os.path.expanduser("~arma") if os.path.isdir("/home/arma") else os.path.expanduser("~")
+    content (this instance's bundled addons), not a workshop mod."""
+    lgsm_dir     = server.get("lgsm_dir", "")
+    workshop_dir = server.get("workshop_dir", "")
+    profile_dir  = server.get("profile_dir", "")
+    serverfiles  = os.path.join(lgsm_dir, "serverfiles") if lgsm_dir else ""
 
     roots = []
-    # Workshop mod dirs (downloaded via SteamCMD / the game)
-    if WORKSHOP_DIR:
-        roots.append((WORKSHOP_DIR, False))
-    roots.extend([
-        (os.path.join(home, ".local/share/Arma Reforger/profile/addons"), False),
-        (os.path.join(home, ".local/share/Arma Reforger/addons"),         False),
-        (os.path.join(home, ".config/Arma Reforger/addons"),              False),
-        (os.path.join(home, ".config/ArmaReforger/addons"),               False),
-    ])
+    if workshop_dir:
+        roots.append((workshop_dir, False))
+    if profile_dir:
+        roots.append((os.path.join(profile_dir, "addons"), False))
     # Bohemia-shipped game content (Conflict, GM, CAH, Operation Omega, etc.)
-    if SERVER_DIR:
+    if serverfiles:
         roots.extend([
-            (os.path.join(SERVER_DIR, "Addons"), True),
-            (os.path.join(SERVER_DIR, "addons"), True),
-            (SERVER_DIR,                          True),  # falls back to walking server install
+            (os.path.join(serverfiles, "Addons"), True),
+            (os.path.join(serverfiles, "addons"), True),
+            (serverfiles,                          True),  # falls back to walking the install
         ])
     seen, out = set(), []
     for path, vanilla in roots:
@@ -456,18 +518,18 @@ def _apply_name_override(scenario):
     return scenario
 
 
-def _discover_locked(force_rescan):
-    """Actual scan work. Caller must hold _SCAN_LOCK."""
+def _discover_locked(server, force_rescan):
+    """Actual scan work. Caller must hold the per-server scan lock."""
     diag = {"candidates_tried": [], "addons_scanned": 0,
             "mods_with_scenarios": 0, "scenarios_total": 0, "errors": []}
 
-    cache_mods, cache_mtimes = ({}, {}) if force_rescan else _scan_cache_load()
+    cache_mods, cache_mtimes = ({}, {}) if force_rescan else _scan_cache_load(server)
     fresh_mods, fresh_mtimes = {}, {}
 
     seen_addon_dirs = set()
     addons_scanned = 0
 
-    for root, is_vanilla in _candidate_addon_roots():
+    for root, is_vanilla in _candidate_addon_roots(server):
         diag["candidates_tried"].append({"path": root, "vanilla": is_vanilla})
         for addon_dir, meta_path, rdb_path in _find_addons(root):
             real_dir = os.path.realpath(addon_dir)
@@ -526,7 +588,7 @@ def _discover_locked(force_rescan):
                 fresh_mods[cache_key] = scenarios
             fresh_mtimes[cache_key] = mtime
 
-    _scan_cache_save(fresh_mods, fresh_mtimes)
+    _scan_cache_save(server, fresh_mods, fresh_mtimes)
 
     flat = []
     for sids in fresh_mods.values():
@@ -535,19 +597,20 @@ def _discover_locked(force_rescan):
     diag["mods_with_scenarios"] = len(fresh_mods)
     diag["scenarios_total"] = len(flat)
     # Back-compat fields the old UI knew about
-    diag["workshop_dir"] = "; ".join(p for p, _ in _candidate_addon_roots()) or None
+    diag["workshop_dir"] = "; ".join(p for p, _ in _candidate_addon_roots(server)) or None
     diag["metas_found"]  = addons_scanned
     return flat, diag
 
 
-def discover_mod_scenarios(force_rescan=False):
+def discover_mod_scenarios(server, force_rescan=False):
     """Return (scenarios, diag).
-       Lock-protected so concurrent /api/status polls or rescan clicks can't
-       launch overlapping scans.  Non-rescan callers get the cached result
-       without doing any disk I/O if a scan is already in progress."""
+       Lock-protected per-server so concurrent /api/status polls or rescan
+       clicks can't launch overlapping scans for the same instance. Non-rescan
+       callers get the cached result without doing any disk I/O if a scan is
+       already in progress."""
     if not force_rescan:
         # Cheap path: just read the on-disk cache.
-        cache_mods, _mtimes = _scan_cache_load()
+        cache_mods, _mtimes = _scan_cache_load(server)
         if cache_mods:
             flat = []
             for sids in cache_mods.values():
@@ -556,35 +619,35 @@ def discover_mod_scenarios(force_rescan=False):
                     "scenarios_total": len(flat), "from_cache": True}
             return flat, diag
 
-    if not _SCAN_LOCK.acquire(blocking=force_rescan):
+    lock = _scan_lock(server["id"])
+    if not lock.acquire(blocking=force_rescan):
         # Scan in progress and we don't want to block — return whatever we have.
-        return _LAST_SCAN_RESULT["scenarios"], (_LAST_SCAN_RESULT["diag"] or {"busy": True})
+        last = _LAST_SCAN_RESULTS.get(server["id"], {"scenarios": [], "diag": None})
+        return last["scenarios"], (last["diag"] or {"busy": True})
     try:
-        scenarios, diag = _discover_locked(force_rescan)
-        _LAST_SCAN_RESULT["scenarios"] = scenarios
-        _LAST_SCAN_RESULT["diag"] = diag
-        _LAST_SCAN_RESULT["ts"] = time.time()
+        scenarios, diag = _discover_locked(server, force_rescan)
+        _LAST_SCAN_RESULTS[server["id"]] = {"scenarios": scenarios, "diag": diag, "ts": time.time()}
         return scenarios, diag
     finally:
-        _SCAN_LOCK.release()
+        lock.release()
 
 
-def cached_scenarios():
+def cached_scenarios(server):
     """Cheap read for /api/status — never triggers a fresh scan."""
-    cache_mods, _mtimes = _scan_cache_load()
+    cache_mods, _mtimes = _scan_cache_load(server)
     flat = []
     for sids in cache_mods.values():
         flat.extend(sids)
     return flat
 
 
-def all_scenarios(force_rescan=False):
+def all_scenarios(server, force_rescan=False):
     """Vanilla list + auto-discovered, deduped by id (vanilla wins for naming).
        Returns (list, diag)."""
     by_id = {}
     for s in AVAILABLE_MISSIONS:
         by_id[s["id"]] = dict(s)
-    discovered, diag = discover_mod_scenarios(force_rescan=force_rescan)
+    discovered, diag = discover_mod_scenarios(server, force_rescan=force_rescan)
     for s in discovered:
         by_id.setdefault(s["id"], dict(s))
     out = list(by_id.values())
@@ -592,23 +655,44 @@ def all_scenarios(force_rescan=False):
     return out, diag
 
 
-def all_scenarios_cached():
+def all_scenarios_cached(server):
     """Like all_scenarios() but never scans — used by /api/status hot path."""
     by_id = {}
     for s in AVAILABLE_MISSIONS:
         by_id[s["id"]] = dict(s)
-    for s in cached_scenarios():
+    for s in cached_scenarios(server):
         by_id.setdefault(s["id"], dict(s))
     out = list(by_id.values())
     out.sort(key=lambda s: (s["source"] != "vanilla", s["source"], s["name"]))
     return out
 
 
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
+# ─── LGSM PROCESS CONTROL ─────────────────────────────────────────────────────
 
-def get_server_pid():
+def lgsm_run(server, command, timeout):
+    """Run `./<id> <command>` inside the instance's LGSM directory. Returns
+    (ok, stdout, stderr). LGSM instance scripts background the game process
+    themselves (tmux) and return once that's done, so these calls are
+    synchronous and bounded by `timeout`."""
+    script = _instance_script(server)
+    if not os.path.isfile(script) or not os.access(script, os.X_OK):
+        return False, "", f"Instance script not found or not executable: {script}"
     try:
-        r = subprocess.run(["pgrep", "-f", "ArmaReforgerServer"], capture_output=True, text=True)
+        r = subprocess.run([script, command], cwd=server["lgsm_dir"],
+                            capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return False, "", f"'{command}' timed out after {timeout}s"
+    except OSError as e:
+        return False, "", str(e)
+
+
+def get_server_pid(server):
+    """Scope process discovery to this instance's own serverfiles path so
+    multiple LGSM instances on the host don't collide."""
+    binary_path = os.path.join(server["lgsm_dir"], "serverfiles", "ArmaReforgerServer")
+    try:
+        r = subprocess.run(["pgrep", "-f", binary_path], capture_output=True, text=True)
         pids = r.stdout.strip().splitlines()
         return int(pids[0]) if pids else None
     except Exception:
@@ -654,9 +738,9 @@ def get_system_ram():
     except Exception:
         return 0, 0
 
-def get_latest_log():
+def get_latest_log(server):
     try:
-        dirs = sorted(glob.glob(f"{LOG_DIR}/logs_*"), reverse=True)
+        dirs = sorted(glob.glob(f"{server['log_dir']}/logs_*"), reverse=True)
         if not dirs:
             return None
         path = os.path.join(dirs[0], "console.log")
@@ -664,24 +748,24 @@ def get_latest_log():
     except Exception:
         return None
 
-def read_config():
+def read_config(server):
     try:
-        with open(SERVER_CONFIG) as f:
+        with open(server["server_config"]) as f:
             return json.load(f)
     except Exception:
         return {}
 
-def write_config(cfg):
-    with open(SERVER_CONFIG, "w") as f:
+def write_config(server, cfg):
+    with open(server["server_config"], "w") as f:
         json.dump(cfg, f, indent="\t")
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 #
 # Reforger session save/load. The toggle is the presence of a top-level
 # `persistence` block in config.json (autosave); `-loadSessionSave` is always
-# passed at launch so any existing save loads on start. Save files live under
-# PROFILE_DIR/.save/ on Linux dedicated installs (Conflict / Combat Ops layout).
-# Subdirs underneath: game/ (world/session), playersave/ (per-player), settings/.
+# passed at launch by LGSM so any existing save loads on start. Save files
+# live under <profile_dir>/.save/ (Conflict / Combat Ops layout). Subdirs
+# underneath: game/ (world/session), playersave/ (per-player), settings/.
 
 _SAVE_SUBDIRS = (".save", "save", "saves")
 
@@ -703,21 +787,22 @@ def _set_persistence_block(cfg, block):
     else:
         gp["persistence"] = block
 
-def _persistence_enabled(cfg=None):
+def _persistence_enabled(server, cfg=None):
     if cfg is None:
-        cfg = read_config()
+        cfg = read_config(server)
     return _get_persistence_block(cfg) is not None
 
 # Subdirs the flush button targets. `settings/` is intentionally preserved
 # because it holds non-session config the server expects to regenerate from.
 _FLUSHABLE_SUBDIRS = ("game", "playersave")
 
-def _save_root():
+def _save_root(server):
+    profile_dir = server.get("profile_dir", "")
     for sub in _SAVE_SUBDIRS:
-        p = os.path.join(PROFILE_DIR, sub)
+        p = os.path.join(profile_dir, sub)
         if os.path.isdir(p):
             return p
-    return os.path.join(PROFILE_DIR, ".save")  # canonical Linux dedicated path
+    return os.path.join(profile_dir, ".save")  # canonical Linux dedicated path
 
 def _scan_dir(path):
     """Return {count, bytes, newest} for files under `path`, or zeros if absent."""
@@ -738,8 +823,8 @@ def _scan_dir(path):
                 newest = st.st_mtime
     return {"count": count, "bytes": total, "newest": newest or None}
 
-def _scan_saves():
-    root = _save_root()
+def _scan_saves(server):
+    root = _save_root(server)
     if not os.path.isdir(root):
         return {"path": root, "exists": False, "total": {"count": 0, "bytes": 0, "newest": None}, "buckets": {}}
     buckets = {name: _scan_dir(os.path.join(root, name)) for name in ("game", "playersave", "settings")}
@@ -757,13 +842,13 @@ def _scan_saves():
         },
     }
 
-def _flush_saves():
+def _flush_saves(server):
     """Remove the contents of `.save/game/` and `.save/playersave/` (world
     session + per-player data). `.save/settings/` is left alone — it holds
     non-session config the server regenerates from. Returns the count of files
     deleted."""
     import shutil
-    root = _save_root()
+    root = _save_root(server)
     if not os.path.isdir(root):
         return 0
     removed = 0
@@ -786,16 +871,16 @@ def _flush_saves():
     return removed
 
 
-def get_map_name(cfg=None):
+def get_map_name(server, cfg=None):
     try:
         if cfg is None:
-            cfg = read_config()
+            cfg = read_config(server)
         sid = cfg.get("game", {}).get("scenarioId", "")
         if not sid:
             return "Unknown"
         # Consult the full merged list (vanilla + discovered, with overrides
         # already applied) so the dashboard tile matches the dropdown.
-        for m in all_scenarios_cached():
+        for m in all_scenarios_cached(server):
             if m["id"] == sid:
                 return m["name"]
         return sid.split("/")[-1].replace(".conf", "")
@@ -850,19 +935,126 @@ def api_csrf():
         return jsonify({"error": "unauthorized"}), 401
     return jsonify({"csrf": _ensure_csrf()})
 
+
+# ─── SERVER REGISTRY ROUTES ───────────────────────────────────────────────────
+
+@app.route("/api/servers")
+def api_servers():
+    if not session.get("logged_in"):
+        return jsonify({"error": "unauthorized"}), 401
+    out = []
+    for s in load_servers():
+        pid = get_server_pid(s)
+        out.append({"id": s["id"], "name": s.get("name") or s["id"], "running": pid is not None})
+    return jsonify({"servers": out, "csrf": _ensure_csrf()})
+
+
+@app.route("/api/servers/add", methods=["POST"])
+def api_servers_add():
+    if not session.get("logged_in"):
+        return jsonify({"error": "unauthorized"}), 401
+    err = _csrf_required()
+    if err: return err
+    data = request.get_json(silent=True) or {}
+
+    sid = str(data.get("id", "")).strip()
+    name = str(data.get("name", "")).strip()
+    lgsm_dir = str(data.get("lgsm_dir", "")).strip().rstrip("/")
+
+    if not _SERVER_ID_RE.match(sid):
+        return jsonify({"ok": False, "error": "id must be 1-32 chars of letters, digits, - or _ (this must match the LGSM instance script name)"})
+    if not name:
+        return jsonify({"ok": False, "error": "name is required"})
+    if not lgsm_dir or not os.path.isdir(lgsm_dir):
+        return jsonify({"ok": False, "error": f"lgsm_dir does not exist: {lgsm_dir}"})
+
+    script = os.path.join(lgsm_dir, sid)
+    if not os.path.isfile(script):
+        return jsonify({"ok": False, "error": f"No LGSM instance script found at {script}. Install it first with: bash linuxgsm.sh {sid}"})
+    if not os.access(script, os.X_OK):
+        return jsonify({"ok": False, "error": f"{script} exists but is not executable"})
+
+    servers = load_servers()
+    if any(s["id"] == sid for s in servers):
+        return jsonify({"ok": False, "error": f"A server with id '{sid}' is already registered"})
+
+    defaults = derive_server_paths(lgsm_dir, sid)
+    entry = {
+        "id": sid,
+        "name": name,
+        "lgsm_dir": lgsm_dir,
+        "server_config": str(data.get("server_config") or defaults["server_config"]).strip(),
+        "profile_dir":   str(data.get("profile_dir")   or defaults["profile_dir"]).strip(),
+        "log_dir":       str(data.get("log_dir")       or defaults["log_dir"]).strip(),
+        "workshop_dir":  str(data.get("workshop_dir")  or defaults["workshop_dir"]).strip(),
+    }
+    servers.append(entry)
+    save_servers(servers)
+    return jsonify({"ok": True, "server": entry})
+
+
+@app.route("/api/servers/update", methods=["POST"])
+def api_servers_update():
+    if not session.get("logged_in"):
+        return jsonify({"error": "unauthorized"}), 401
+    err = _csrf_required()
+    if err: return err
+    data = request.get_json(silent=True) or {}
+    sid = str(data.get("id", "")).strip()
+
+    servers = load_servers()
+    idx = next((i for i, s in enumerate(servers) if s["id"] == sid), None)
+    if idx is None:
+        return jsonify({"ok": False, "error": "Unknown server id"})
+
+    entry = servers[idx]
+    for field in ("name", "lgsm_dir", "server_config", "profile_dir", "log_dir", "workshop_dir"):
+        if field in data and str(data[field]).strip():
+            entry[field] = str(data[field]).strip().rstrip("/") if field == "lgsm_dir" else str(data[field]).strip()
+
+    script = os.path.join(entry["lgsm_dir"], entry["id"])
+    if not os.path.isfile(script):
+        return jsonify({"ok": False, "error": f"No LGSM instance script found at {script}"})
+
+    servers[idx] = entry
+    save_servers(servers)
+    return jsonify({"ok": True, "server": entry})
+
+
+@app.route("/api/servers/remove", methods=["POST"])
+def api_servers_remove():
+    if not session.get("logged_in"):
+        return jsonify({"error": "unauthorized"}), 401
+    err = _csrf_required()
+    if err: return err
+    data = request.get_json(silent=True) or {}
+    sid = str(data.get("id", "")).strip()
+
+    servers = load_servers()
+    new = [s for s in servers if s["id"] != sid]
+    if len(new) == len(servers):
+        return jsonify({"ok": False, "error": "Unknown server id"})
+    save_servers(new)
+    return jsonify({"ok": True})
+
+
+# ─── PER-SERVER ROUTES ─────────────────────────────────────────────────────────
+
 @app.route("/api/status")
 def api_status():
     if not session.get("logged_in"):
         return jsonify({"error": "unauthorized"}), 401
-    pid = get_server_pid()
-    cfg = read_config()
+    server, err = _require_server()
+    if err: return err
+    pid = get_server_pid(server)
+    cfg = read_config(server)
     cpu, ram = get_cpu_ram(pid) if pid else (0.0, 0.0)
     ram_used, ram_total = get_system_ram()
-    missions = all_scenarios_cached()
+    missions = all_scenarios_cached(server)
     return jsonify({
         "running":        pid is not None,
         "pid":            pid,
-        "map":            get_map_name(cfg),
+        "map":            get_map_name(server, cfg),
         "players":        0,
         "uptime":         format_uptime(get_process_uptime(pid)) if pid else "—",
         "uptime_sec":     get_process_uptime(pid) if pid else 0,
@@ -889,7 +1081,9 @@ def api_scenarios_rescan():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
-    missions, diag = all_scenarios(force_rescan=True)
+    server, err = _require_server()
+    if err: return err
+    missions, diag = all_scenarios(server, force_rescan=True)
     return jsonify({
         "ok": True,
         "missions": missions,
@@ -902,7 +1096,9 @@ def api_scenarios_rescan():
 def api_metrics():
     if not session.get("logged_in"):
         return jsonify({"error": "unauthorized"}), 401
-    pid = get_server_pid()
+    server, err = _require_server()
+    if err: return err
+    pid = get_server_pid(server)
     cpu, ram = get_cpu_ram(pid) if pid else (0.0, 0.0)
     ram_used, ram_total = get_system_ram()
     return jsonify({
@@ -915,8 +1111,10 @@ def api_metrics():
 def api_logs():
     if not session.get("logged_in"):
         return jsonify({"error": "unauthorized"}), 401
+    server, err = _require_server()
+    if err: return err
     n = int(request.args.get("lines", 100))
-    path = get_latest_log()
+    path = get_latest_log(server)
     if not path:
         return jsonify({"lines": [], "path": None})
     try:
@@ -954,14 +1152,16 @@ def api_config():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
+    server, err = _require_server()
+    if err: return err
     data = request.get_json(silent=True) or {}
-    cfg  = read_config()
+    cfg  = read_config(server)
     changed = False
     if "server_name" in data and data["server_name"].strip():
         cfg.setdefault("game", {})["name"] = data["server_name"].strip(); changed = True
     if "scenario_id" in data:
         sid = data["scenario_id"].strip()
-        valid_ids = {m["id"] for m in all_scenarios_cached()}
+        valid_ids = {m["id"] for m in all_scenarios_cached(server)}
         if sid not in valid_ids:
             return jsonify({"ok": False, "error": "Unknown scenario"})
         cfg.setdefault("game", {})["scenarioId"] = sid; changed = True
@@ -972,8 +1172,8 @@ def api_config():
     if not changed:
         return jsonify({"ok": False, "error": "No changes"})
     try:
-        write_config(cfg)
-        return jsonify({"ok": True, "restart_required": get_server_pid() is not None})
+        write_config(server, cfg)
+        return jsonify({"ok": True, "restart_required": get_server_pid(server) is not None})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -981,15 +1181,17 @@ def api_config():
 def api_persistence_get():
     if not session.get("logged_in"):
         return jsonify({"error": "unauthorized"}), 401
-    cfg = read_config()
+    server, err = _require_server()
+    if err: return err
+    cfg = read_config(server)
     block = _get_persistence_block(cfg) or {}
-    saves = _scan_saves()
+    saves = _scan_saves(server)
     return jsonify({
-        "enabled":          _persistence_enabled(cfg),
+        "enabled":          _persistence_enabled(server, cfg),
         "autoSaveInterval": block.get("autoSaveInterval", 10),
         "hiveId":           block.get("hiveId", 1),
         "saves":            saves,
-        "profile_dir":      PROFILE_DIR,
+        "profile_dir":      server.get("profile_dir"),
     })
 
 @app.route("/api/persistence", methods=["POST"])
@@ -998,8 +1200,10 @@ def api_persistence_set():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
+    server, err = _require_server()
+    if err: return err
     data = request.get_json(silent=True) or {}
-    cfg  = read_config()
+    cfg  = read_config(server)
     enabled = bool(data.get("enabled"))
     if enabled:
         block = _get_persistence_block(cfg) or {}
@@ -1027,11 +1231,11 @@ def api_persistence_set():
     else:
         _set_persistence_block(cfg, None)
     try:
-        write_config(cfg)
+        write_config(server, cfg)
         return jsonify({
             "ok": True,
-            "restart_required": get_server_pid() is not None,
-            "enabled":           _persistence_enabled(cfg),
+            "restart_required": get_server_pid(server) is not None,
+            "enabled":           _persistence_enabled(server, cfg),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -1042,13 +1246,15 @@ def api_persistence_flush():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
+    server, err = _require_server()
+    if err: return err
     # Refuse to delete saves while the server is running — the game holds file
     # handles and may rewrite them mid-flush, which leaves us with partials.
-    if get_server_pid():
+    if get_server_pid(server):
         return jsonify({"ok": False, "error": "Stop the server before flushing saves"})
     try:
-        removed = _flush_saves()
-        return jsonify({"ok": True, "removed": removed, "saves": _scan_saves()})
+        removed = _flush_saves(server)
+        return jsonify({"ok": True, "removed": removed, "saves": _scan_saves(server)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1058,20 +1264,22 @@ def api_mods_add():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
+    server, err = _require_server()
+    if err: return err
     data = request.get_json(silent=True) or {}
     norm = _normalize_mod_entry({"modId": data.get("modId",""), "name": data.get("name",""), "version": data.get("version","")})
     if not norm:
         return jsonify({"ok": False, "error": "Invalid mod entry (modId must be 1-32 hex chars)"})
     if "name" not in norm:
         return jsonify({"ok": False, "error": "name is required for manual entry"})
-    cfg  = read_config()
+    cfg  = read_config(server)
     mods = cfg.setdefault("game", {}).setdefault("mods", [])
     if any(m.get("modId", "").upper() == norm["modId"] for m in mods):
         return jsonify({"ok": False, "error": "Mod with this ID already exists"})
     mods.append(norm)
     try:
-        write_config(cfg)
-        return jsonify({"ok": True, "restart_required": get_server_pid() is not None, "mods": mods})
+        write_config(server, cfg)
+        return jsonify({"ok": True, "restart_required": get_server_pid(server) is not None, "mods": mods})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1079,12 +1287,14 @@ def api_mods_add():
 def api_mods_import():
     """Bulk-import mods. Accepts either:
        - multipart/form-data with a 'file' part containing a JSON array, plus
-         form fields 'mode' (replace|merge) and '_csrf'.
-       - application/json with {payload: <text or array>, mode, _csrf}.
+         form fields 'mode' (replace|merge), 'server_id' and '_csrf'.
+       - application/json with {payload: <text or array>, mode, server_id, _csrf}.
     """
     if not session.get("logged_in"):
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
+    if err: return err
+    server, err = _require_server()
     if err: return err
 
     raw = None
@@ -1132,7 +1342,7 @@ def api_mods_import():
         seen.add(norm["modId"])
         valid.append(norm)
 
-    cfg = read_config()
+    cfg = read_config(server)
     g   = cfg.setdefault("game", {})
 
     if mode == "merge":
@@ -1151,7 +1361,7 @@ def api_mods_import():
         msg = f"Replaced full mod list with {len(valid)} entries"
 
     try:
-        write_config(cfg)
+        write_config(server, cfg)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1161,7 +1371,7 @@ def api_mods_import():
         "imported": len(valid),
         "skipped": skipped,
         "mods": g["mods"],
-        "restart_required": get_server_pid() is not None,
+        "restart_required": get_server_pid(server) is not None,
     })
 
 @app.route("/api/mods/remove", methods=["POST"])
@@ -1170,19 +1380,21 @@ def api_mods_remove():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
+    server, err = _require_server()
+    if err: return err
     data   = request.get_json(silent=True) or {}
     mod_id = data.get("modId", "").strip().upper()
     if not mod_id:
         return jsonify({"ok": False, "error": "Missing modId"})
-    cfg  = read_config()
+    cfg  = read_config(server)
     mods = cfg.get("game", {}).get("mods", [])
     new  = [m for m in mods if str(m.get("modId", "")).upper() != mod_id]
     if len(new) == len(mods):
         return jsonify({"ok": False, "error": "Mod not found"})
     cfg.setdefault("game", {})["mods"] = new
     try:
-        write_config(cfg)
-        return jsonify({"ok": True, "restart_required": get_server_pid() is not None, "mods": new})
+        write_config(server, cfg)
+        return jsonify({"ok": True, "restart_required": get_server_pid(server) is not None, "mods": new})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1192,16 +1404,14 @@ def api_start():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
-    if get_server_pid():
+    server, err = _require_server()
+    if err: return err
+    if get_server_pid(server):
         return jsonify({"ok": False, "error": "Server is already running"})
-    try:
-        subprocess.Popen([SERVER_BINARY] + build_server_args(), cwd=SERVER_DIR,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-        time.sleep(1)
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    ok, out, errout = lgsm_run(server, "start", timeout=45)
+    if not ok:
+        return jsonify({"ok": False, "error": (errout or out or "LGSM start failed").strip()[-800:]})
+    return jsonify({"ok": True})
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
@@ -1209,14 +1419,14 @@ def api_stop():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
-    pid = get_server_pid()
-    if not pid:
+    server, err = _require_server()
+    if err: return err
+    if not get_server_pid(server):
         return jsonify({"ok": False, "error": "Server is not running"})
-    try:
-        subprocess.run(["kill", str(pid)], check=True)
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    ok, out, errout = lgsm_run(server, "stop", timeout=60)
+    if not ok:
+        return jsonify({"ok": False, "error": (errout or out or "LGSM stop failed").strip()[-800:]})
+    return jsonify({"ok": True})
 
 @app.route("/api/restart", methods=["POST"])
 def api_restart():
@@ -1224,21 +1434,12 @@ def api_restart():
         return jsonify({"error": "unauthorized"}), 401
     err = _csrf_required()
     if err: return err
-    pid = get_server_pid()
-    if pid:
-        try:
-            subprocess.run(["kill", str(pid)], check=True)
-            time.sleep(3)
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"Stop failed: {e}"})
-    try:
-        subprocess.Popen([SERVER_BINARY] + build_server_args(), cwd=SERVER_DIR,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-        time.sleep(1)
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    server, err = _require_server()
+    if err: return err
+    ok, out, errout = lgsm_run(server, "restart", timeout=90)
+    if not ok:
+        return jsonify({"ok": False, "error": (errout or out or "LGSM restart failed").strip()[-800:]})
+    return jsonify({"ok": True})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PANEL_PORT, threaded=True)
