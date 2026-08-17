@@ -722,24 +722,37 @@ def _tmux_pane_pids(server):
     except Exception:
         return None
 
-def _find_descendant_by_name(root_pid, name_substr):
-    """Search /proc for root_pid or any of its descendants whose comm or
-    cmdline contains name_substr (case-insensitive). LGSM commonly execs the
-    game binary in place of the pane's shell, so root_pid itself is often a
-    match; walking descendants covers the case where it isn't."""
+def _proc_matches(pid, needle):
     try:
-        all_pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+        with open(f"/proc/{pid}/comm") as f:
+            if needle in f.read().strip().lower():
+                return True
     except Exception:
-        return None
-    children = {}
-    for pid in all_pids:
-        try:
-            with open(f"/proc/{pid}/stat") as f:
-                stat = f.read()
-            ppid = int(stat.rsplit(")", 1)[1].split()[1])
-            children.setdefault(ppid, []).append(pid)
-        except Exception:
-            continue
+        pass
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if needle in f.read().decode(errors="ignore").lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+def _proc_children(pid):
+    """Direct child PIDs of `pid`, via the kernel-provided children list —
+    O(this process's own children), not a scan of every process on the host."""
+    try:
+        with open(f"/proc/{pid}/task/{pid}/children") as f:
+            return [int(p) for p in f.read().split()]
+    except Exception:
+        return []
+
+def _find_descendant_by_name(root_pid, name_substr):
+    """root_pid or any of its descendants whose comm/cmdline contains
+    name_substr (case-insensitive). LGSM commonly execs the game binary in
+    place of the pane's shell, so root_pid itself is usually the match —
+    checked first, cheaply, before ever walking descendants. Only walks
+    root_pid's own process tree (via /proc/<pid>/task/<pid>/children), never
+    the whole host's process table."""
     needle = name_substr.lower()
     queue = [root_pid]
     seen = set()
@@ -748,19 +761,9 @@ def _find_descendant_by_name(root_pid, name_substr):
         if pid in seen:
             continue
         seen.add(pid)
-        try:
-            with open(f"/proc/{pid}/comm") as f:
-                if needle in f.read().strip().lower():
-                    return pid
-        except Exception:
-            pass
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                if needle in f.read().decode(errors="ignore").lower():
-                    return pid
-        except Exception:
-            pass
-        queue.extend(children.get(pid, []))
+        if _proc_matches(pid, needle):
+            return pid
+        queue.extend(_proc_children(pid))
     return None
 
 def get_server_pid(server):
