@@ -187,10 +187,17 @@ install_lgsm_instance() {
     mkdir -p "$root"
     chown "$user:$user" "$root"
     echo -e "      ${DIM}Downloading LinuxGSM and installing instance '${id}'...${NC}"
+    # LGSM's bootstrap only recognizes its fixed game shortnames (armarserver
+    # is the only one for Arma Reforger) — it is NOT a free-form instance
+    # name at this step. To run multiple instances of the same game, LGSM's
+    # own multi-instance pattern is: bootstrap once as the real shortname,
+    # then copy that script to the desired instance id and install from
+    # the copy. Skip the copy when the id already IS "armarserver".
     sudo -u "$user" bash -c "
         cd '$root' &&
         curl -sLo linuxgsm.sh https://linuxgsm.sh && chmod +x linuxgsm.sh &&
-        bash linuxgsm.sh $id &&
+        bash linuxgsm.sh armarserver &&
+        if [ '$id' != 'armarserver' ]; then cp armarserver '$id'; fi &&
         yes | ./$id auto-install
     "
 }
@@ -402,6 +409,7 @@ fi
 if [[ "$MODE" == "add-server" ]]; then
     EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$ARMA_USER")
     PANEL_DIR=$(grep "^WorkingDirectory=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$PANEL_DIR")
+    SERVERS_ROOT="/home/$EXISTING_USER/servers"
     read -p "  Panel directory [$PANEL_DIR]: " INPUT_PANEL_DIR
     PANEL_DIR="${INPUT_PANEL_DIR:-$PANEL_DIR}"
     if [ ! -f "$PANEL_DIR/servers.json" ] && [ ! -d "$PANEL_DIR" ]; then
@@ -409,7 +417,7 @@ if [[ "$MODE" == "add-server" ]]; then
         exit 1
     fi
 
-    read -p "  New instance id (LGSM script name, e.g. armarserver2): " NEW_ID
+    read -p "  New instance id (any label, e.g. server01 — becomes the instance's script name): " NEW_ID
     read -p "  Display name [$NEW_ID]: " NEW_NAME
     NEW_NAME="${NEW_NAME:-$NEW_ID}"
     read -p "  Install a fresh LGSM instance now, or register an existing one? [install/existing]: " NEW_MODE
@@ -422,6 +430,8 @@ if [[ "$MODE" == "add-server" ]]; then
             exit 1
         fi
     else
+        read -p "  Servers root directory [$SERVERS_ROOT]: " INPUT_SERVERS_ROOT
+        SERVERS_ROOT="${INPUT_SERVERS_ROOT:-$SERVERS_ROOT}"
         NEW_DIR="$SERVERS_ROOT/$NEW_ID"
         install_lgsm_instance "$EXISTING_USER" "$NEW_ID" "$NEW_DIR"
         read -p "  Server name [$NEW_NAME]: " CFG_NAME; CFG_NAME="${CFG_NAME:-$NEW_NAME}"
