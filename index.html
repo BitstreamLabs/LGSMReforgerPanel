@@ -13,6 +13,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Arma Panel">
 <link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="icon" href="/static/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=Barlow:wght@400;500&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -988,7 +989,7 @@ async function fetchMetrics() {
 setInterval(fetchMetrics, 3000);
 
 // ─── SSE Log stream ───────────────────────────────────────────────────────────
-let evtSource = null;
+let logPollTimer = null;
 
 function colorLine(line) {
   const l = line.toLowerCase();
@@ -1020,7 +1021,7 @@ function clearLog() {
 }
 
 function startLogStream() {
-  if (evtSource) evtSource.close();
+  if (logPollTimer) clearInterval(logPollTimer);
   if (!currentServerId) {
     document.getElementById('log-live-dot').classList.add('off');
     return;
@@ -1030,7 +1031,7 @@ function startLogStream() {
   fetchLogs(80);
 
   // Then poll every 2 seconds for new lines
-  evtSource = setInterval(() => fetchLogs(30), 2000);
+  logPollTimer = setInterval(() => fetchLogs(30), 2000);
   document.getElementById('log-live-dot').classList.remove('off');
 }
 
