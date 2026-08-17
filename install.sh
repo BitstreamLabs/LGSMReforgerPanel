@@ -4,10 +4,13 @@
 # https://github.com/BitstreamLabs/arma-reforger-panel
 #
 # Modes:
-#   sudo bash install.sh               — full install (LGSM instance(s) + panel)
-#   sudo bash install.sh --panel-only  — install panel only (LGSM instances already exist)
-#   sudo bash install.sh --add-server  — register one more existing LGSM instance
-#   sudo bash install.sh --update      — update panel files only
+#   sudo bash install.sh                   — full install (LGSM instance(s) + panel)
+#   sudo bash install.sh --panel-only      — install panel only (LGSM instances already exist)
+#   sudo bash install.sh --add-server      — register one more existing LGSM instance
+#   sudo bash install.sh --update          — update panel files only
+#   sudo bash install.sh --uninstall       — full uninstall (panel + all managed LGSM instances)
+#   sudo bash install.sh --uninstall-panel — remove the panel only (LGSM instances untouched)
+#   sudo bash install.sh --remove-server   — unregister (and optionally delete) one LGSM instance
 #
 # Every managed server is a LinuxGSM (https://linuxgsm.com) Arma Reforger
 # ("armarserver") instance. The panel drives each one entirely through its
@@ -31,9 +34,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODE="full"
 case "$1" in
-    --panel-only) MODE="panel" ;;
-    --add-server) MODE="add-server" ;;
-    --update)     MODE="update" ;;
+    --panel-only)      MODE="panel" ;;
+    --add-server)      MODE="add-server" ;;
+    --update)          MODE="update" ;;
+    --uninstall)       MODE="uninstall" ;;
+    --uninstall-panel) MODE="uninstall-panel" ;;
+    --remove-server)   MODE="remove-server" ;;
 esac
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -45,10 +51,13 @@ echo -e "${BOLD}${CYAN}╚══════════════════
 echo ""
 
 case "$MODE" in
-    full)        echo -e "  Mode: ${GREEN}Full install${NC} (LinuxGSM instance(s) + Panel)" ;;
-    panel)       echo -e "  Mode: ${YELLOW}Panel only${NC} (register existing LGSM instances)" ;;
-    add-server)  echo -e "  Mode: ${YELLOW}Add server${NC} (register one more LGSM instance)" ;;
-    update)      echo -e "  Mode: ${CYAN}Update${NC} (panel files only)" ;;
+    full)             echo -e "  Mode: ${GREEN}Full install${NC} (LinuxGSM instance(s) + Panel)" ;;
+    panel)            echo -e "  Mode: ${YELLOW}Panel only${NC} (register existing LGSM instances)" ;;
+    add-server)       echo -e "  Mode: ${YELLOW}Add server${NC} (register one more LGSM instance)" ;;
+    update)           echo -e "  Mode: ${CYAN}Update${NC} (panel files only)" ;;
+    uninstall)        echo -e "  Mode: ${RED}Full uninstall${NC} (Panel + all managed LGSM instances)" ;;
+    uninstall-panel)  echo -e "  Mode: ${RED}Uninstall panel${NC} (LGSM instances left untouched)" ;;
+    remove-server)    echo -e "  Mode: ${YELLOW}Remove server${NC} (unregister one LGSM instance)" ;;
 esac
 echo ""
 
@@ -196,6 +205,198 @@ add_monitor_cron() {
     ( sudo -u "$user" crontab -l 2>/dev/null | grep -vF "${root}/${id} monitor" ; echo "$line" ) | sudo -u "$user" crontab -
     echo -e "      ${GREEN}✓${NC} Cron monitor installed for '${id}' (every 5 min)."
 }
+
+# ── Shared helper: remove the monitor cron entry for an instance ──────────────
+remove_monitor_cron() {
+    local user="$1" root="$2" id="$3"
+    if sudo -u "$user" crontab -l 2>/dev/null | grep -qF "${root}/${id} monitor"; then
+        ( sudo -u "$user" crontab -l 2>/dev/null | grep -vF "${root}/${id} monitor" ) | sudo -u "$user" crontab -
+        echo -e "      ${GREEN}✓${NC} Cron monitor removed for '${id}'."
+    fi
+}
+
+# ── Shared helper: drop a server entry from servers.json ──────────────────────
+# Usage: unregister_server <panel_dir> <id>
+unregister_server() {
+    local panel_dir="$1" id="$2"
+    [ -f "$panel_dir/servers.json" ] || return 0
+    python3 - "$panel_dir/servers.json" "$id" << 'PYEOF'
+import json, sys
+
+servers_file, sid = sys.argv[1:3]
+
+try:
+    with open(servers_file) as f:
+        servers = json.load(f)
+    if not isinstance(servers, list):
+        servers = []
+except (OSError, json.JSONDecodeError):
+    servers = []
+
+servers = [s for s in servers if s.get("id") != sid]
+
+with open(servers_file, "w") as f:
+    json.dump(servers, f, indent=2)
+
+print(f"      Unregistered '{sid}' -> {servers_file}")
+PYEOF
+}
+
+# ── Shared helper: stop and delete one LGSM instance's files ──────────────────
+# Usage: remove_lgsm_instance <user> <id> <lgsm_dir>
+remove_lgsm_instance() {
+    local user="$1" id="$2" dir="$3"
+    if [ -f "$dir/$id" ]; then
+        echo -e "      ${DIM}Stopping '${id}'...${NC}"
+        sudo -u "$user" bash -c "cd '$dir' && ./$id stop" 2>/dev/null || true
+    fi
+    remove_monitor_cron "$user" "$dir" "$id"
+    rm -rf "$dir"
+    echo -e "      ${GREEN}✓${NC} Removed instance files at ${dir}"
+}
+
+# ── Shared helper: stop and remove the panel service + files ──────────────────
+remove_panel() {
+    local panel_dir="$1"
+    if systemctl list-unit-files 2>/dev/null | grep -q '^arma-panel.service'; then
+        systemctl stop arma-panel 2>/dev/null || true
+        systemctl disable arma-panel 2>/dev/null || true
+    fi
+    rm -f /etc/systemd/system/arma-panel.service
+    systemctl daemon-reload
+    rm -rf "$panel_dir"
+    echo -e "      ${GREEN}✓${NC} Panel service and files removed."
+}
+
+# ── UNINSTALL-PANEL mode ─────────────────────────────────────────────────────
+if [[ "$MODE" == "uninstall-panel" ]]; then
+    EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$ARMA_USER")
+    PANEL_DIR_EXISTING=$(grep "^WorkingDirectory=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$PANEL_DIR")
+    read -p "  Panel directory [$PANEL_DIR_EXISTING]: " INPUT_PANEL_DIR
+    PANEL_DIR_EXISTING="${INPUT_PANEL_DIR:-$PANEL_DIR_EXISTING}"
+
+    echo ""
+    echo -e "  ${YELLOW}This will remove the panel service and delete:${NC} ${CYAN}${PANEL_DIR_EXISTING}${NC}"
+    echo -e "  ${DIM}LGSM game server instances are left completely untouched.${NC}"
+    read -p "  Proceed? [y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
+    echo ""
+
+    echo -e "${YELLOW}Removing panel...${NC}"
+    remove_panel "$PANEL_DIR_EXISTING"
+    echo -e "${GREEN}✓ Panel uninstalled.${NC}"
+    echo ""
+    exit 0
+fi
+
+# ── REMOVE-SERVER mode ───────────────────────────────────────────────────────
+if [[ "$MODE" == "remove-server" ]]; then
+    read -p "  Panel directory [$PANEL_DIR]: " INPUT_PANEL_DIR
+    PANEL_DIR="${INPUT_PANEL_DIR:-$PANEL_DIR}"
+    if [ ! -f "$PANEL_DIR/servers.json" ]; then
+        echo -e "${RED}ERROR: ${PANEL_DIR}/servers.json not found.${NC}"
+        exit 1
+    fi
+    EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$ARMA_USER")
+
+    read -p "  Instance id to remove: " RM_ID
+    RM_DIR=$(python3 -c "
+import json
+try:
+    with open('$PANEL_DIR/servers.json') as f:
+        servers = json.load(f)
+    for s in servers:
+        if s.get('id') == '$RM_ID':
+            print(s.get('lgsm_dir', ''))
+            break
+except (OSError, json.JSONDecodeError):
+    pass
+")
+    if [ -z "$RM_DIR" ]; then
+        echo -e "${RED}ERROR: '${RM_ID}' is not registered in ${PANEL_DIR}/servers.json${NC}"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "  Found ${CYAN}${RM_ID}${NC} @ ${RM_DIR}"
+    read -p "  Also stop the instance and delete its files (game data included)? [y/N]: " DELETE_FILES
+    echo ""
+    read -p "  Proceed? [y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
+    echo ""
+
+    if [[ "$DELETE_FILES" =~ ^[Yy]$ ]]; then
+        remove_lgsm_instance "$EXISTING_USER" "$RM_ID" "$RM_DIR"
+    fi
+    unregister_server "$PANEL_DIR" "$RM_ID"
+    chown "$EXISTING_USER:$EXISTING_USER" "$PANEL_DIR/servers.json" 2>/dev/null || true
+    systemctl restart arma-panel 2>/dev/null || true
+    echo -e "${GREEN}✓ Server '${RM_ID}' removed.${NC}"
+    exit 0
+fi
+
+# ── UNINSTALL mode (full: panel + all managed LGSM instances) ─────────────────
+if [[ "$MODE" == "uninstall" ]]; then
+    EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$ARMA_USER")
+    PANEL_DIR_EXISTING=$(grep "^WorkingDirectory=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$PANEL_DIR")
+    read -p "  Panel directory [$PANEL_DIR_EXISTING]: " INPUT_PANEL_DIR
+    PANEL_DIR_EXISTING="${INPUT_PANEL_DIR:-$PANEL_DIR_EXISTING}"
+
+    UNINSTALL_IDS=()
+    UNINSTALL_DIRS=()
+    if [ -f "$PANEL_DIR_EXISTING/servers.json" ]; then
+        while IFS=$'\t' read -r sid sdir; do
+            [ -z "$sid" ] && continue
+            UNINSTALL_IDS+=("$sid"); UNINSTALL_DIRS+=("$sdir")
+        done < <(python3 -c "
+import json
+try:
+    with open('$PANEL_DIR_EXISTING/servers.json') as f:
+        servers = json.load(f)
+    for s in servers:
+        print(f\"{s.get('id','')}\t{s.get('lgsm_dir','')}\")
+except (OSError, json.JSONDecodeError):
+    pass
+")
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}This will remove:${NC}"
+    echo -e "    - Panel service and files at ${CYAN}${PANEL_DIR_EXISTING}${NC}"
+    for i in "${!UNINSTALL_IDS[@]}"; do
+        echo -e "    - LGSM instance ${CYAN}${UNINSTALL_IDS[$i]}${NC} @ ${UNINSTALL_DIRS[$i]}"
+    done
+    if [ ${#UNINSTALL_IDS[@]} -eq 0 ]; then
+        echo -e "    ${DIM}(no servers registered in servers.json)${NC}"
+    fi
+    echo ""
+    read -p "  Proceed with full uninstall? [y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
+
+    read -p "  Also delete the system user '${EXISTING_USER}' and its home directory? [y/N]: " DELETE_USER
+    echo ""
+
+    echo -e "${YELLOW}[1/2] Removing LGSM instance(s)...${NC}"
+    for i in "${!UNINSTALL_IDS[@]}"; do
+        echo -e "  ${CYAN}→ ${UNINSTALL_IDS[$i]}${NC}"
+        remove_lgsm_instance "$EXISTING_USER" "${UNINSTALL_IDS[$i]}" "${UNINSTALL_DIRS[$i]}"
+    done
+
+    echo -e "${YELLOW}[2/2] Removing panel...${NC}"
+    remove_panel "$PANEL_DIR_EXISTING"
+
+    if [[ "$DELETE_USER" =~ ^[Yy]$ ]]; then
+        if id "$EXISTING_USER" &>/dev/null; then
+            userdel -r "$EXISTING_USER" 2>/dev/null || true
+            echo -e "      ${GREEN}✓${NC} System user '${EXISTING_USER}' removed."
+        fi
+    fi
+
+    echo ""
+    echo -e "${GREEN}✓ Full uninstall complete.${NC}"
+    echo ""
+    exit 0
+fi
 
 # ── ADD-SERVER mode ─────────────────────────────────────────────────────────────
 if [[ "$MODE" == "add-server" ]]; then
@@ -491,6 +692,13 @@ echo -e "    ${YELLOW}sudo bash install.sh --add-server${NC}"
 echo ""
 echo -e "  ${BOLD}Update panel in the future:${NC}"
 echo -e "    ${YELLOW}git pull && sudo bash install.sh --update${NC}"
+echo ""
+echo -e "  ${BOLD}Remove a single server:${NC}"
+echo -e "    ${YELLOW}sudo bash install.sh --remove-server${NC}"
+echo ""
+echo -e "  ${BOLD}Uninstall:${NC}"
+echo -e "    ${YELLOW}sudo bash install.sh --uninstall-panel${NC}  ${DIM}# panel only, LGSM instances untouched${NC}"
+echo -e "    ${YELLOW}sudo bash install.sh --uninstall${NC}        ${DIM}# panel + all managed LGSM instances${NC}"
 echo ""
 echo -e "${BOLD}${YELLOW}⚠  Firewall — action required${NC}"
 echo -e "  This installer does ${BOLD}not${NC} touch your firewall. Open the following ports"
