@@ -966,10 +966,12 @@ function pushChart(chart, value) {
 // ─── Metrics polling ─────────────────────────────────────────────────────────
 async function fetchMetrics() {
   if (!currentServerId) return;
+  const reqServerId = currentServerId;
   try {
     const r = await apiGet('/api/metrics');
     if (r.status === 401) { window.location.href = '/login'; return; }
     const d = await r.json();
+    if (reqServerId !== currentServerId) return; // stale — a switch happened while this was in flight
 
     const ramPct = d.ram_total > 0 ? Math.round(d.ram_used / d.ram_total * 100) : 0;
 
@@ -1036,10 +1038,12 @@ let lastLogLine = '';
 
 async function fetchLogs(count) {
   if (!currentServerId) return;
+  const reqServerId = currentServerId;
   try {
     const r = await apiGet(`/api/logs?lines=${count}`);
     if (!r.ok) return;
     const d = await r.json();
+    if (reqServerId !== currentServerId) return; // stale — a switch happened while this was in flight
     if (!d.lines || d.lines.length === 0) return;
 
     const el = document.getElementById('log-output');
@@ -1070,10 +1074,12 @@ let busy = false;
 
 async function fetchStatus() {
   if (!currentServerId) return;
+  const reqServerId = currentServerId;
   try {
     const r = await apiGet('/api/status');
     if (r.status === 401) { window.location.href = '/login'; return; }
     const d = await r.json();
+    if (reqServerId !== currentServerId) return; // stale — a switch happened while this was in flight
     updateUI(d);
   } catch(e) {
     setLog('Connection error', 'error');
@@ -1451,10 +1457,12 @@ function _renderPersistStats(s) {
 
 async function fetchPersistence() {
   if (!currentServerId) return;
+  const reqServerId = currentServerId;
   try {
     const r = await apiGet('/api/persistence');
     if (!r.ok) return;
     const d = await r.json();
+    if (reqServerId !== currentServerId) return; // stale — a switch happened while this was in flight
     document.getElementById('input-persist-enabled').value  = d.enabled ? 'true' : 'false';
     document.getElementById('input-persist-interval').value = d.autoSaveInterval;
     document.getElementById('input-persist-hive').value     = d.hiveId;
