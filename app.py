@@ -1177,6 +1177,49 @@ def api_config():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
+# Full config.json editor. The structured /api/config fields above cover the
+# common cases; this lets admins reach everything else (mission rotation,
+# admin lists, gameProperties, VON, etc.) without SSH access.
+_RAW_CONFIG_MAX_BYTES = 500_000
+
+@app.route("/api/config/raw", methods=["GET"])
+def api_config_raw_get():
+    if not session.get("logged_in"):
+        return jsonify({"error": "unauthorized"}), 401
+    server, err = _require_server()
+    if err: return err
+    cfg = read_config(server)
+    return jsonify({"ok": True, "raw": json.dumps(cfg, indent="\t")})
+
+@app.route("/api/config/raw", methods=["POST"])
+def api_config_raw_set():
+    if not session.get("logged_in"):
+        return jsonify({"error": "unauthorized"}), 401
+    err = _csrf_required()
+    if err: return err
+    server, err = _require_server()
+    if err: return err
+
+    body = request.get_json(silent=True) or {}
+    raw = body.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return jsonify({"ok": False, "error": "Empty config"}), 400
+    if len(raw.encode("utf-8")) > _RAW_CONFIG_MAX_BYTES:
+        return jsonify({"ok": False, "error": f"Config exceeds {_RAW_CONFIG_MAX_BYTES // 1000} KB limit"}), 400
+
+    try:
+        cfg = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return jsonify({"ok": False, "error": f"Invalid JSON: {e.msg} at line {e.lineno} col {e.colno}"}), 400
+    if not isinstance(cfg, dict):
+        return jsonify({"ok": False, "error": "Top-level value must be a JSON object"}), 400
+
+    try:
+        write_config(server, cfg)
+        return jsonify({"ok": True, "restart_required": get_server_pid(server) is not None})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route("/api/persistence", methods=["GET"])
 def api_persistence_get():
     if not session.get("logged_in"):

@@ -432,6 +432,40 @@
 
   @keyframes fadeUp   { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* Modal */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; z-index: 1000;
+    background: rgba(6,8,10,0.75); backdrop-filter: blur(2px);
+    align-items: center; justify-content: center; padding: 24px;
+    animation: fadeUp 0.15s ease both;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: var(--surface); border: 1px solid var(--border);
+    width: 100%; max-width: 760px; max-height: 88vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+  }
+  .modal-header h2 {
+    font-family: 'Barlow Condensed', sans-serif; font-weight: 700;
+    font-size: 18px; letter-spacing: 0.03em; text-transform: uppercase;
+    color: var(--text);
+  }
+  .modal-close {
+    background: none; border: none; color: var(--muted); font-size: 22px;
+    line-height: 1; cursor: pointer; padding: 2px 6px;
+  }
+  .modal-close:hover { color: var(--text); }
+  .modal-body { padding: 18px 20px; overflow-y: auto; }
+  .modal-footer {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 14px 20px; border-top: 1px solid var(--border);
+  }
 </style>
 </head>
 <body>
@@ -590,6 +624,11 @@
     </div>
     <button class="btn-save" id="btn-save" onclick="saveConfig()">Save changes</button>
     <div class="restart-notice" id="restart-notice">⚠ Zmiany zostaną zastosowane po restarcie serwera</div>
+
+    <!-- Advanced: full config.json editor (mission rotation, admins, gameProperties, VON, etc.) -->
+    <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:20px;">
+      <button type="button" class="link-btn" onclick="openRawConfig()">Advanced: edit full config.json</button>
+    </div>
   </div>
 
   <!-- Mods -->
@@ -709,6 +748,29 @@
     Refresh in <span id="refresh-timer">10</span>s &nbsp;|&nbsp; Panel v3.0
   </footer>
 
+</div>
+
+<!-- Raw config.json modal -->
+<div class="modal-overlay" id="raw-config-overlay" onmousedown="if(event.target===this) closeRawConfig()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>Edit config.json</h2>
+      <button type="button" class="modal-close" onclick="closeRawConfig()" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:10.5px;color:var(--muted);margin-bottom:10px;line-height:1.5;">
+        Full raw <code>config.json</code> for this instance — admins, game properties, mission rotation,
+        VON, everything. This overwrites the whole file; mistakes can stop the server from starting.
+        Saving reloads the page so the fields above stay in sync.
+      </div>
+      <textarea id="raw-config-text" rows="20" maxlength="500000" spellcheck="false" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11.5px;padding:10px;line-height:1.5;resize:vertical;outline:none;white-space:pre;"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-save" type="button" onclick="loadRawConfig()" style="margin:0;flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text);">Reload from disk</button>
+      <button class="btn-save" type="button" onclick="saveRawConfig()" style="margin:0;flex:0 0 auto;">Save &amp; reload page</button>
+      <button class="btn-save" type="button" onclick="closeRawConfig()" style="margin:0 0 0 auto;flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--muted);">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1228,6 +1290,60 @@ async function saveConfig() {
   setBusy(false);
 }
 
+async function openRawConfig() {
+  document.getElementById('raw-config-overlay').classList.add('open');
+  document.getElementById('raw-config-text').value = 'Loading...';
+  await loadRawConfig();
+}
+
+function closeRawConfig() {
+  document.getElementById('raw-config-overlay').classList.remove('open');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('raw-config-overlay').classList.contains('open')) {
+    closeRawConfig();
+  }
+});
+
+async function loadRawConfig() {
+  if (!currentServerId) return;
+  try {
+    const r = await apiGet('/api/config/raw');
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('raw-config-text').value = d.raw;
+    } else {
+      setLog('Błąd wczytywania config.json: ' + (d.error || 'nieznany'), 'error');
+    }
+  } catch(e) { setLog('Błąd połączenia', 'error'); }
+}
+
+async function saveRawConfig() {
+  const raw = document.getElementById('raw-config-text').value;
+  if (!raw.trim()) { setLog('Config nie może być pusty', 'error'); return; }
+  try {
+    JSON.parse(raw);
+  } catch(e) {
+    setLog('Niepoprawny JSON: ' + e.message, 'error');
+    return;
+  }
+  if (!confirm('Overwrite the full config.json for this server? This bypasses the fields above and applies exactly what is in the editor. The page will reload afterwards.')) return;
+
+  setBusy(true);
+  setLog('Zapisywanie config.json...', 'info');
+  try {
+    const r = await postJson('/api/config/raw', { raw });
+    const d = await r.json();
+    if (d.ok) {
+      window.location.reload();
+    } else {
+      setLog('Błąd zapisu: ' + (d.error || 'nieznany'), 'error');
+      setBusy(false);
+    }
+  } catch(e) { setLog('Błąd połączenia', 'error'); setBusy(false); }
+}
+
 function _fmtBytes(n) {
   if (!n) return '0 B';
   const u = ['B','KB','MB','GB']; let i = 0;
@@ -1410,6 +1526,7 @@ async function switchServer(id) {
   lastLogLine = '';
   document.getElementById('log-output').innerHTML = '';
   startLogStream();
+  closeRawConfig();
   await Promise.all([fetchStatus(), fetchPersistence()]);
   fetchMetrics();
 }
