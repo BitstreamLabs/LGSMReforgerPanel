@@ -842,6 +842,23 @@ def _scan_saves(server):
         },
     }
 
+# _scan_saves() walks every save file on disk (os.walk + os.stat per file),
+# which gets slow with a large/active session — and it's requested on every
+# server switch. Cache briefly per server so rapid switches/polls don't each
+# re-walk the whole tree; the flush endpoint always calls _scan_saves directly
+# to get a fresh count after deleting files.
+_SAVE_SCAN_CACHE: dict[str, tuple[float, dict]] = {}
+_SAVE_SCAN_TTL = 5.0
+
+def _scan_saves_cached(server):
+    now = time.time()
+    cached = _SAVE_SCAN_CACHE.get(server["id"])
+    if cached and now - cached[0] < _SAVE_SCAN_TTL:
+        return cached[1]
+    result = _scan_saves(server)
+    _SAVE_SCAN_CACHE[server["id"]] = (now, result)
+    return result
+
 def _flush_saves(server):
     """Remove the contents of `.save/game/` and `.save/playersave/` (world
     session + per-player data). `.save/settings/` is left alone — it holds
@@ -1237,7 +1254,7 @@ def api_persistence_get():
     if err: return err
     cfg = read_config(server)
     block = _get_persistence_block(cfg) or {}
-    saves = _scan_saves(server)
+    saves = _scan_saves_cached(server)
     return jsonify({
         "enabled":          _persistence_enabled(server, cfg),
         "autoSaveInterval": block.get("autoSaveInterval", 10),
@@ -1306,7 +1323,9 @@ def api_persistence_flush():
         return jsonify({"ok": False, "error": "Stop the server before flushing saves"})
     try:
         removed = _flush_saves(server)
-        return jsonify({"ok": True, "removed": removed, "saves": _scan_saves(server)})
+        fresh = _scan_saves(server)
+        _SAVE_SCAN_CACHE[server["id"]] = (time.time(), fresh)
+        return jsonify({"ok": True, "removed": removed, "saves": fresh})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
