@@ -86,10 +86,17 @@ if [[ "$MODE" == "update" ]]; then
         echo -e "  Run the full installer first: sudo bash install.sh"
         exit 1
     fi
-    cp "$SCRIPT_DIR/app.py"     "$PANEL_DIR_EXISTING/"
-    cp "$SCRIPT_DIR/index.html" "$PANEL_DIR_EXISTING/"
-    cp "$SCRIPT_DIR/login.html" "$PANEL_DIR_EXISTING/"
-    cp "$SCRIPT_DIR/static/"*   "$PANEL_DIR_EXISTING/static/"
+    # The panel is sometimes run directly out of the git checkout (WorkingDirectory
+    # == this script's own directory) rather than a separate deployed copy — skip
+    # the copy step in that case, since `cp` onto the same file would fail.
+    if [ "$(cd "$SCRIPT_DIR" && pwd -P)" = "$(cd "$PANEL_DIR_EXISTING" && pwd -P)" ]; then
+        echo -e "      ${DIM}Panel runs directly from this checkout — nothing to copy.${NC}"
+    else
+        cp "$SCRIPT_DIR/app.py"     "$PANEL_DIR_EXISTING/"
+        cp "$SCRIPT_DIR/index.html" "$PANEL_DIR_EXISTING/"
+        cp "$SCRIPT_DIR/login.html" "$PANEL_DIR_EXISTING/"
+        cp "$SCRIPT_DIR/static/"*   "$PANEL_DIR_EXISTING/static/"
+    fi
     chown -R "$EXISTING_USER:$EXISTING_USER" "$PANEL_DIR_EXISTING"
     systemctl restart arma-panel
     echo -e "${GREEN}✓ Panel updated and restarted.${NC}"
