@@ -400,13 +400,14 @@ fi
 
 # ── ADD-SERVER mode ─────────────────────────────────────────────────────────────
 if [[ "$MODE" == "add-server" ]]; then
-    if [ ! -f "$PANEL_DIR/servers.json" ] && [ ! -d "$PANEL_DIR" ]; then
-        echo -e "${RED}ERROR: Panel not found. Run the full installer first.${NC}"
-        exit 1
-    fi
+    EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$ARMA_USER")
+    PANEL_DIR=$(grep "^WorkingDirectory=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$PANEL_DIR")
     read -p "  Panel directory [$PANEL_DIR]: " INPUT_PANEL_DIR
     PANEL_DIR="${INPUT_PANEL_DIR:-$PANEL_DIR}"
-    EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$ARMA_USER")
+    if [ ! -f "$PANEL_DIR/servers.json" ] && [ ! -d "$PANEL_DIR" ]; then
+        echo -e "${RED}ERROR: Panel not found at ${PANEL_DIR}. Run the full installer first.${NC}"
+        exit 1
+    fi
 
     read -p "  New instance id (LGSM script name, e.g. armarserver2): " NEW_ID
     read -p "  Display name [$NEW_ID]: " NEW_NAME
