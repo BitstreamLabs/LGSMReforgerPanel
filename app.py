@@ -687,14 +687,36 @@ def lgsm_run(server, command, timeout):
         return False, "", str(e)
 
 
-def _tmux_pane_pids(session):
-    """PIDs of the panes in LGSM's tmux session for this instance (session
-    name == instance id), or None if the session doesn't exist at all."""
+def _lgsm_tmux_socket(server):
+    """LGSM never uses the default tmux socket — every instance gets its own,
+    named "<id>-<uid>" where <uid> is a short hash LGSM generates once (on
+    that instance's first-ever start) and stores in lgsm/data/<id>.uid. Every
+    LGSM command (start/stop/console/check_status) targets that exact socket:
+        tmux -L "<id>-<uid>" ...
+    Returns the socket name, or None if the instance has never been started
+    (no .uid file yet — nothing to check)."""
+    uid_path = os.path.join(server["lgsm_dir"], "lgsm", "data", f"{server['id']}.uid")
     try:
-        r = subprocess.run(["tmux", "has-session", "-t", session], capture_output=True, text=True)
+        with open(uid_path) as f:
+            uid = f.read().strip()
+    except OSError:
+        return None
+    return f"{server['id']}-{uid}" if uid else None
+
+def _tmux_pane_pids(server):
+    """PIDs of the panes in LGSM's tmux session for this instance, on LGSM's
+    own per-instance socket — the same session check_status.sh/console use —
+    or None if the session doesn't exist (or was never started)."""
+    socket = _lgsm_tmux_socket(server)
+    if not socket:
+        return None
+    session = server["id"]
+    try:
+        r = subprocess.run(["tmux", "-L", socket, "has-session", "-t", session],
+                            capture_output=True, text=True)
         if r.returncode != 0:
             return None
-        r = subprocess.run(["tmux", "list-panes", "-t", session, "-F", "#{pane_pid}"],
+        r = subprocess.run(["tmux", "-L", socket, "list-panes", "-t", session, "-F", "#{pane_pid}"],
                             capture_output=True, text=True)
         return [int(p) for p in r.stdout.split() if p.isdigit()]
     except Exception:
@@ -743,14 +765,15 @@ def _find_descendant_by_name(root_pid, name_substr):
 
 def get_server_pid(server):
     """Whether LGSM considers this instance running is authoritative via its
-    own tmux session (session name == instance id) — the same thing
-    `./<id> console` and `./<id> details` check. Matching purely by the
-    binary's absolute path via pgrep (the old approach) silently found
-    nothing whenever LGSM launched it with a relative path or different
-    cwd, reporting OFFLINE despite the server being fully up and joinable.
-    We now resolve the actual PID by walking the tmux pane's process tree,
-    falling back to the old pgrep sweep only if tmux itself isn't usable."""
-    pane_pids = _tmux_pane_pids(server["id"])
+    own tmux session, reached on LGSM's own per-instance socket (see
+    _lgsm_tmux_socket) — the same thing `./<id> console`, `./<id> details`
+    and check_status.sh use. Matching purely by the binary's absolute path
+    via pgrep (the old approach) silently found nothing whenever LGSM
+    launched it with a relative path or different cwd, reporting OFFLINE
+    despite the server being fully up and joinable. We now resolve the
+    actual PID by walking the tmux pane's process tree, falling back to the
+    old pgrep sweep only if no LGSM tmux socket/session is found at all."""
+    pane_pids = _tmux_pane_pids(server)
     if pane_pids is not None:
         for pane_pid in pane_pids:
             found = _find_descendant_by_name(pane_pid, "ArmaReforgerServer")
