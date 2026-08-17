@@ -750,6 +750,52 @@
 
 </div>
 
+<!-- Edit server modal -->
+<div class="modal-overlay" id="edit-server-overlay" onmousedown="if(event.target===this) closeEditServer()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>Edit server</h2>
+      <button type="button" class="modal-close" onclick="closeEditServer()" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:10.5px;color:var(--muted);margin-bottom:14px;line-height:1.5;">
+        <code id="edit-srv-id-label"></code> — instance id can't be changed here; it must match the
+        LGSM instance script name. Leave the path fields as-is unless your layout differs from LGSM's default.
+      </div>
+      <div class="config-grid">
+        <div class="field-group">
+          <label for="edit-srv-name">Display name</label>
+          <input type="text" id="edit-srv-name" maxlength="64" />
+        </div>
+        <div class="field-group" style="grid-column:1 / -1;">
+          <label for="edit-srv-lgsm-dir">LGSM directory</label>
+          <input type="text" id="edit-srv-lgsm-dir" />
+        </div>
+        <div class="field-group" style="grid-column:1 / -1;">
+          <label for="edit-srv-server-config">Server config path</label>
+          <input type="text" id="edit-srv-server-config" />
+        </div>
+        <div class="field-group" style="grid-column:1 / -1;">
+          <label for="edit-srv-profile-dir">Profile directory</label>
+          <input type="text" id="edit-srv-profile-dir" />
+        </div>
+        <div class="field-group" style="grid-column:1 / -1;">
+          <label for="edit-srv-log-dir">Log directory</label>
+          <input type="text" id="edit-srv-log-dir" />
+        </div>
+        <div class="field-group" style="grid-column:1 / -1;">
+          <label for="edit-srv-workshop-dir">Workshop / addons directory</label>
+          <input type="text" id="edit-srv-workshop-dir" />
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-save" type="button" onclick="saveEditServer()" style="margin:0;flex:0 0 auto;">Save changes</button>
+      <button class="btn-save" type="button" onclick="closeEditServer()" style="margin:0 0 0 auto;flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--muted);">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Raw config.json modal -->
 <div class="modal-overlay" id="raw-config-overlay" onmousedown="if(event.target===this) closeRawConfig()">
   <div class="modal-box">
@@ -1480,15 +1526,26 @@ function renderServersList(servers) {
         </div>
         <span style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace">${escHtml(s.id)}</span>
       </div>
-      <button onclick="removeServer('${escHtml(s.id)}')" style="
-        background:transparent;border:1px solid var(--border);color:var(--muted);
-        font-family:'Barlow Condensed',sans-serif;font-size:11px;letter-spacing:0.15em;
-        text-transform:uppercase;padding:5px 12px;cursor:pointer;flex-shrink:0;
-        transition:all 0.2s;white-space:nowrap
-      " onmouseover="this.style.borderColor='var(--offline)';this.style.color='var(--offline)'"
-         onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
-        Remove ✕
-      </button>`;
+      <div style="display:flex;gap:8px;flex-shrink:0;">
+        <button onclick="openEditServer('${escHtml(s.id)}')" style="
+          background:transparent;border:1px solid var(--border);color:var(--muted);
+          font-family:'Barlow Condensed',sans-serif;font-size:11px;letter-spacing:0.15em;
+          text-transform:uppercase;padding:5px 12px;cursor:pointer;
+          transition:all 0.2s;white-space:nowrap
+        " onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+           onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+          Edit
+        </button>
+        <button onclick="removeServer('${escHtml(s.id)}')" style="
+          background:transparent;border:1px solid var(--border);color:var(--muted);
+          font-family:'Barlow Condensed',sans-serif;font-size:11px;letter-spacing:0.15em;
+          text-transform:uppercase;padding:5px 12px;cursor:pointer;
+          transition:all 0.2s;white-space:nowrap
+        " onmouseover="this.style.borderColor='var(--offline)';this.style.color='var(--offline)'"
+           onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+          Remove ✕
+        </button>
+      </div>`;
     el.appendChild(row);
   });
 }
@@ -1554,6 +1611,55 @@ async function addServer() {
     }
   } catch (e) { setLog('Connection error', 'error'); }
   document.getElementById('btn-add-server').disabled = false;
+}
+
+let editingServerId = '';
+
+function openEditServer(id) {
+  const s = knownServers.find(x => x.id === id);
+  if (!s) return;
+  editingServerId = id;
+  document.getElementById('edit-srv-id-label').textContent = id;
+  document.getElementById('edit-srv-name').value = s.name || '';
+  document.getElementById('edit-srv-lgsm-dir').value = s.lgsm_dir || '';
+  document.getElementById('edit-srv-server-config').value = s.server_config || '';
+  document.getElementById('edit-srv-profile-dir').value = s.profile_dir || '';
+  document.getElementById('edit-srv-log-dir').value = s.log_dir || '';
+  document.getElementById('edit-srv-workshop-dir').value = s.workshop_dir || '';
+  document.getElementById('edit-server-overlay').classList.add('open');
+}
+
+function closeEditServer() {
+  editingServerId = '';
+  document.getElementById('edit-server-overlay').classList.remove('open');
+}
+
+async function saveEditServer() {
+  if (!editingServerId) return;
+  const name          = document.getElementById('edit-srv-name').value.trim();
+  const lgsm_dir       = document.getElementById('edit-srv-lgsm-dir').value.trim();
+  const server_config = document.getElementById('edit-srv-server-config').value.trim();
+  const profile_dir   = document.getElementById('edit-srv-profile-dir').value.trim();
+  const log_dir        = document.getElementById('edit-srv-log-dir').value.trim();
+  const workshop_dir   = document.getElementById('edit-srv-workshop-dir').value.trim();
+  if (!name || !lgsm_dir) { setLog('Display name and LGSM directory are required', 'error'); return; }
+
+  setLog('Saving server details…', 'info');
+  try {
+    const r = await postJson('/api/servers/update', {
+      id: editingServerId, name, lgsm_dir, server_config, profile_dir, log_dir, workshop_dir,
+    });
+    const d = await r.json();
+    if (d.ok) {
+      setLog('Server details saved', 'ok');
+      closeEditServer();
+      // Paths (profile/log/workshop/config) feed cached scenario/mod scans and
+      // the log stream — reload so everything re-derives from the new values.
+      window.location.reload();
+    } else {
+      setLog('Error: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch (e) { setLog('Connection error', 'error'); }
 }
 
 async function removeServer(id) {

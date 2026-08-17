@@ -945,7 +945,16 @@ def api_servers():
     out = []
     for s in load_servers():
         pid = get_server_pid(s)
-        out.append({"id": s["id"], "name": s.get("name") or s["id"], "running": pid is not None})
+        out.append({
+            "id": s["id"],
+            "name": s.get("name") or s["id"],
+            "running": pid is not None,
+            "lgsm_dir":      s.get("lgsm_dir", ""),
+            "server_config": s.get("server_config", ""),
+            "profile_dir":   s.get("profile_dir", ""),
+            "log_dir":       s.get("log_dir", ""),
+            "workshop_dir":  s.get("workshop_dir", ""),
+        })
     return jsonify({"servers": out, "csrf": _ensure_csrf()})
 
 
