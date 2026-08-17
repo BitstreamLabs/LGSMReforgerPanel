@@ -77,14 +77,15 @@ fi
 # ── UPDATE mode ───────────────────────────────────────────────────────────────
 if [[ "$MODE" == "update" ]]; then
     echo -e "${YELLOW}Updating panel files...${NC}"
-    if [ ! -d "$PANEL_DIR" ]; then
-        echo -e "${RED}ERROR: Panel not found at ${PANEL_DIR}${NC}"
+    # Read existing user/dir from panel service before checking existence —
+    # the hardcoded default ($PANEL_DIR) is only a fallback for a missing unit.
+    EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "arma")
+    PANEL_DIR_EXISTING=$(grep "^WorkingDirectory=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$PANEL_DIR")
+    if [ ! -d "$PANEL_DIR_EXISTING" ]; then
+        echo -e "${RED}ERROR: Panel not found at ${PANEL_DIR_EXISTING}${NC}"
         echo -e "  Run the full installer first: sudo bash install.sh"
         exit 1
     fi
-    # Read existing user from panel service
-    EXISTING_USER=$(grep "^User=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "arma")
-    PANEL_DIR_EXISTING=$(grep "^WorkingDirectory=" /etc/systemd/system/arma-panel.service 2>/dev/null | cut -d= -f2 || echo "$PANEL_DIR")
     cp "$SCRIPT_DIR/app.py"     "$PANEL_DIR_EXISTING/"
     cp "$SCRIPT_DIR/index.html" "$PANEL_DIR_EXISTING/"
     cp "$SCRIPT_DIR/login.html" "$PANEL_DIR_EXISTING/"
