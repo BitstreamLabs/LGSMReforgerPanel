@@ -687,9 +687,78 @@ def lgsm_run(server, command, timeout):
         return False, "", str(e)
 
 
+def _tmux_pane_pids(session):
+    """PIDs of the panes in LGSM's tmux session for this instance (session
+    name == instance id), or None if the session doesn't exist at all."""
+    try:
+        r = subprocess.run(["tmux", "has-session", "-t", session], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        r = subprocess.run(["tmux", "list-panes", "-t", session, "-F", "#{pane_pid}"],
+                            capture_output=True, text=True)
+        return [int(p) for p in r.stdout.split() if p.isdigit()]
+    except Exception:
+        return None
+
+def _find_descendant_by_name(root_pid, name_substr):
+    """Search /proc for root_pid or any of its descendants whose comm or
+    cmdline contains name_substr (case-insensitive). LGSM commonly execs the
+    game binary in place of the pane's shell, so root_pid itself is often a
+    match; walking descendants covers the case where it isn't."""
+    try:
+        all_pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return None
+    children = {}
+    for pid in all_pids:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            children.setdefault(ppid, []).append(pid)
+        except Exception:
+            continue
+    needle = name_substr.lower()
+    queue = [root_pid]
+    seen = set()
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                if needle in f.read().strip().lower():
+                    return pid
+        except Exception:
+            pass
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                if needle in f.read().decode(errors="ignore").lower():
+                    return pid
+        except Exception:
+            pass
+        queue.extend(children.get(pid, []))
+    return None
+
 def get_server_pid(server):
-    """Scope process discovery to this instance's own serverfiles path so
-    multiple LGSM instances on the host don't collide."""
+    """Whether LGSM considers this instance running is authoritative via its
+    own tmux session (session name == instance id) — the same thing
+    `./<id> console` and `./<id> details` check. Matching purely by the
+    binary's absolute path via pgrep (the old approach) silently found
+    nothing whenever LGSM launched it with a relative path or different
+    cwd, reporting OFFLINE despite the server being fully up and joinable.
+    We now resolve the actual PID by walking the tmux pane's process tree,
+    falling back to the old pgrep sweep only if tmux itself isn't usable."""
+    pane_pids = _tmux_pane_pids(server["id"])
+    if pane_pids is not None:
+        for pane_pid in pane_pids:
+            found = _find_descendant_by_name(pane_pid, "ArmaReforgerServer")
+            if found:
+                return found
+        # Session exists (LGSM thinks it's running) but the binary isn't
+        # up under it yet — mid-start, not a case to fall through on.
+        return None
     binary_path = os.path.join(server["lgsm_dir"], "serverfiles", "ArmaReforgerServer")
     try:
         r = subprocess.run(["pgrep", "-f", binary_path], capture_output=True, text=True)
