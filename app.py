@@ -407,7 +407,11 @@ def _addon_name_from_gproj(addon_dir):
     return m.group(1).strip() if m else None
 
 
-_RDB_PATH_RE = re.compile(rb'Missions/[A-Za-z0-9_./\-]+\.conf')
+# Case-insensitive: most mods use "Missions/", but at least one confirmed
+# real-world mod ("WARFARE - VANILLA") ships its .rdb with lowercase
+# "missions/" — Reforger itself is apparently fine with either, since it's
+# the engine's own generated resource database either way.
+_RDB_PATH_RE = re.compile(rb'Missions/[A-Za-z0-9_./\-]+\.conf', re.IGNORECASE)
 
 def _scenarios_from_rdb(rdb_path, source_label):
     """Fallback: parse `resourceDatabase.rdb` for scenario records.
