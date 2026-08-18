@@ -899,11 +899,17 @@ def _persistence_enabled(server, cfg=None):
 _FLUSHABLE_SUBDIRS = ("game", "playersave")
 
 def _save_root(server):
+    """Reforger sometimes writes session saves under a nested "profile/"
+    subfolder inside the instance's profile_dir (confirmed on a real
+    deployment: .../profiles/server/profile/.save, while addons/mods stay
+    directly under .../profiles/server/ — so this only affects the save
+    root, not profile_dir itself). Check both layouts."""
     profile_dir = server.get("profile_dir", "")
-    for sub in _SAVE_SUBDIRS:
-        p = os.path.join(profile_dir, sub)
-        if os.path.isdir(p):
-            return p
+    for base in (profile_dir, os.path.join(profile_dir, "profile")):
+        for sub in _SAVE_SUBDIRS:
+            p = os.path.join(base, sub)
+            if os.path.isdir(p):
+                return p
     return os.path.join(profile_dir, ".save")  # canonical Linux dedicated path
 
 def _scan_dir(path):
