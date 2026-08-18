@@ -866,7 +866,10 @@ def write_config(server, cfg):
 # live under <profile_dir>/.save/ (Conflict / Combat Ops layout). Subdirs
 # underneath: game/ (world/session), playersave/ (per-player), settings/.
 
-_SAVE_SUBDIRS = (".save", "save", "saves")
+# ".save" is the current documented folder; ".db" is an older/alternate name
+# seen in some community reports. Checked in this order — first one that
+# actually exists on disk wins (see _save_root below).
+_SAVE_SUBDIRS = (".save", "save", "saves", ".db", "db")
 
 def _get_persistence_block(cfg):
     """Read the persistence block at its real schema location:
